@@ -1,0 +1,32 @@
+# UI
+streamlit>=1.36,<2.0
+
+# Scraping — Layer 1 & 2
+httpx[http2]>=0.27
+beautifulsoup4>=4.12
+lxml>=5.2
+selectolax>=0.3
+
+# Scraping — Layer 3 & 4
+playwright>=1.46
+playwright-stealth>=1.0.6
+
+# Data
+pandas>=2.2
+numpy>=1.26
+openpyxl>=3.1
+
+# Dates
+dateparser>=1.2
+
+# Config & utils
+pyyaml>=6.0
+pydantic>=2.7
+tenacity>=8.3
+python-dotenv>=1.0
+
+# Dev
+pytest>=8.2
+pytest-asyncio>=0.23
+ruff>=0.5
+mypy>=1.10
