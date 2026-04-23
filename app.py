@@ -30,8 +30,19 @@ def main() -> None:
 
     pages = {
         "App": [
-            st.Page(main_dashboard.render, title="Dashboard", icon="📊", default=True),
-            st.Page(settings.render, title="Settings", icon="⚙️"),
+            st.Page(
+                main_dashboard.render,
+                title="Dashboard",
+                icon="📊",
+                url_path="dashboard",
+                default=True,
+            ),
+            st.Page(
+                settings.render,
+                title="Settings",
+                icon="⚙️",
+                url_path="settings",
+            ),
         ],
     }
     nav = st.navigation(pages)
