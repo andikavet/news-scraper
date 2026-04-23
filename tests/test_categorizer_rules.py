@@ -59,6 +59,18 @@ def test_rules_to_dataframe_round_trip():
     assert out.iloc[1]["Exclude_tokens"] == "w"
 
 
+def test_rules_to_dataframe_empty_uses_string_dtype():
+    """Regression: empty rules must produce string-typed columns so
+    ``st.data_editor`` with ``st.column_config.TextColumn`` renders a
+    fresh grouping instead of raising ``StreamlitAPIException`` with
+    ``ColumnDataKind.FLOAT``."""
+    df = rules_to_dataframe([])
+    assert len(df) == 0
+    assert list(df.columns) == ["Category", "Include_tokens", "Exclude_tokens"]
+    for col in df.columns:
+        assert str(df[col].dtype) == "string", f"{col} dtype is {df[col].dtype}"
+
+
 def test_rules_from_excel_round_trip():
     src = pd.DataFrame(
         {

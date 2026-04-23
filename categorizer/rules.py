@@ -73,11 +73,18 @@ def rules_from_excel(buf: IO[bytes] | bytes) -> list[CategoryRule]:
 
 
 def rules_to_dataframe(rules: list[CategoryRule]) -> pd.DataFrame:
+    # Explicit string dtype so st.data_editor TextColumn works even when
+    # rules is empty (pandas would otherwise default empty columns to
+    # float64 and st.column_config.TextColumn rejects FLOAT-typed columns).
     return pd.DataFrame(
         {
-            "Category": [r.category for r in rules],
-            "Include_tokens": [", ".join(r.include_tokens) for r in rules],
-            "Exclude_tokens": [", ".join(r.exclude_tokens) for r in rules],
+            "Category": pd.Series([r.category for r in rules], dtype="string"),
+            "Include_tokens": pd.Series(
+                [", ".join(r.include_tokens) for r in rules], dtype="string"
+            ),
+            "Exclude_tokens": pd.Series(
+                [", ".join(r.exclude_tokens) for r in rules], dtype="string"
+            ),
         }
     )
 
