@@ -1,0 +1,4 @@
+Category,Include_tokens,Exclude_tokens
+Agriculture,"padi, sawah, pertanian",subsidi
+Mining,"tambang, batu bara","subsidi, impor"
+Trade,"ekspor, impor",
