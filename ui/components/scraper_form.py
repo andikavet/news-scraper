@@ -52,6 +52,23 @@ def _render_test_selector(source: ScrapeSource) -> None:
     default_url = source.url_template.replace("{page}", "1")
     test_url = st.text_input("Test URL", value=default_url, key="scraper_test_url")
     if st.button("Run Test Selector", key="scraper_test_run"):
+        missing = [
+            f
+            for f, v in (
+                ("container", source.selectors.container),
+                ("title", source.selectors.title),
+                ("link", source.selectors.link),
+                ("date", source.selectors.date),
+            )
+            if not v.strip()
+        ]
+        if missing:
+            st.error(
+                "Cannot run Test Selector — the following selector(s) are empty: "
+                + ", ".join(missing)
+                + ". Fill them in above and try again."
+            )
+            return
         with st.spinner("Fetching…"):
             result = run_selector_test(test_url, source.selectors)
         if not result.ok:
@@ -77,72 +94,98 @@ def _render_form(sources: list[ScrapeSource]) -> None:
     edit_idx, draft = _pick_source_for_edit(sources)
     is_new = edit_idx is None
 
-    with st.form("scraper_form", clear_on_submit=False):
-        c1, c2 = st.columns(2)
-        with c1:
-            name = st.text_input("Source name", value=draft.name)
-            url_template = st.text_input("URL template", value=draft.url_template)
-            pagination_type = st.selectbox(
-                "Pagination type",
-                options=_PAGINATION_OPTIONS,
-                index=_PAGINATION_OPTIONS.index(draft.pagination_type),
-            )
-            avg_page_per_month = st.number_input(
-                "Avg pages / month",
-                min_value=1,
-                value=draft.avg_page_per_month,
-                step=1,
-            )
-        with c2:
-            enabled = st.checkbox("Enabled on dashboard", value=draft.enabled)
-            max_retries = st.number_input(
-                "Max retries", min_value=0, value=draft.max_retries, step=1
-            )
-            min_sleep = st.number_input(
-                "Min sleep (sec)", min_value=0.0, value=float(draft.sleep.min), step=0.5
-            )
-            max_sleep = st.number_input(
-                "Max sleep (sec)", min_value=0.0, value=float(draft.sleep.max), step=0.5
-            )
-            enabled_layers = st.multiselect(
-                "Allowed layers",
-                options=_LAYER_OPTIONS,
-                default=list(draft.enabled_layers),
-                help="Engine tries these in ascending order; falls through on failure.",
-            )
-
-        st.markdown("**Selectors**")
-        s1, s2 = st.columns(2)
-        with s1:
-            container_sel = st.text_input("Container", value=draft.selectors.container)
-            title_sel = st.text_input("Title", value=draft.selectors.title)
-        with s2:
-            link_sel = st.text_input("Link", value=draft.selectors.link)
-            date_sel = st.text_input("Date", value=draft.selectors.date)
-
-        next_button_sel = ""
-        scrolls_per_page = draft.scrolls_per_page
-        if pagination_type == "click_next":
-            next_button_sel = st.text_input(
-                "Next-button selector",
-                value=draft.selectors.next_button or "",
-                help="CSS/XPath for the 'Next Page' button (Playwright will click this).",
-            )
-        elif pagination_type == "infinite_scroll":
-            scrolls_per_page = st.number_input(
-                "Scrolls per logical page",
-                min_value=1,
-                value=draft.scrolls_per_page,
-                step=1,
-            )
-
-        col_save, col_delete = st.columns([1, 1])
-        save_clicked = col_save.form_submit_button("Save", type="primary")
-        delete_clicked = (
-            col_delete.form_submit_button("Delete this source", type="secondary")
-            if not is_new
-            else False
+    # NOTE: intentionally NOT wrapped in st.form — we want the Test Selector
+    # button (rendered below) to see live widget values without requiring the
+    # user to Save first.
+    form_key = f"scraper_{'new' if is_new else edit_idx}"
+    c1, c2 = st.columns(2)
+    with c1:
+        name = st.text_input("Source name", value=draft.name, key=f"{form_key}_name")
+        url_template = st.text_input(
+            "URL template", value=draft.url_template, key=f"{form_key}_url"
         )
+        pagination_type = st.selectbox(
+            "Pagination type",
+            options=_PAGINATION_OPTIONS,
+            index=_PAGINATION_OPTIONS.index(draft.pagination_type),
+            key=f"{form_key}_pag",
+        )
+        avg_page_per_month = st.number_input(
+            "Avg pages / month",
+            min_value=1,
+            value=draft.avg_page_per_month,
+            step=1,
+            key=f"{form_key}_avg",
+        )
+    with c2:
+        enabled = st.checkbox(
+            "Enabled on dashboard", value=draft.enabled, key=f"{form_key}_enabled"
+        )
+        max_retries = st.number_input(
+            "Max retries",
+            min_value=0,
+            value=draft.max_retries,
+            step=1,
+            key=f"{form_key}_retries",
+        )
+        min_sleep = st.number_input(
+            "Min sleep (sec)",
+            min_value=0.0,
+            value=float(draft.sleep.min),
+            step=0.5,
+            key=f"{form_key}_min",
+        )
+        max_sleep = st.number_input(
+            "Max sleep (sec)",
+            min_value=0.0,
+            value=float(draft.sleep.max),
+            step=0.5,
+            key=f"{form_key}_max",
+        )
+        enabled_layers = st.multiselect(
+            "Allowed layers",
+            options=_LAYER_OPTIONS,
+            default=list(draft.enabled_layers),
+            help="Engine tries these in ascending order; falls through on failure.",
+            key=f"{form_key}_layers",
+        )
+
+    st.markdown("**Selectors**")
+    s1, s2 = st.columns(2)
+    with s1:
+        container_sel = st.text_input(
+            "Container", value=draft.selectors.container, key=f"{form_key}_container"
+        )
+        title_sel = st.text_input("Title", value=draft.selectors.title, key=f"{form_key}_title")
+    with s2:
+        link_sel = st.text_input("Link", value=draft.selectors.link, key=f"{form_key}_link")
+        date_sel = st.text_input("Date", value=draft.selectors.date, key=f"{form_key}_date")
+
+    next_button_sel = ""
+    scrolls_per_page = draft.scrolls_per_page
+    if pagination_type == "click_next":
+        next_button_sel = st.text_input(
+            "Next-button selector",
+            value=draft.selectors.next_button or "",
+            help="CSS/XPath for the 'Next Page' button (Playwright will click this).",
+            key=f"{form_key}_nextbtn",
+        )
+    elif pagination_type == "infinite_scroll":
+        scrolls_per_page = st.number_input(
+            "Scrolls per logical page",
+            min_value=1,
+            value=draft.scrolls_per_page,
+            step=1,
+            key=f"{form_key}_scrolls",
+        )
+
+    col_save, col_delete = st.columns([1, 1])
+    save_clicked = col_save.button("Save", type="primary", key=f"{form_key}_save")
+    delete_clicked = (
+        col_delete.button("Delete this source", type="secondary", key=f"{form_key}_delete")
+        if not is_new
+        else False
+    )
 
     # Reconstruct a ScrapeSource in-place for the Test Selector helper, using
     # whatever the user has entered in the form right now.
