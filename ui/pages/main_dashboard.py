@@ -72,10 +72,12 @@ def _collect_items_if_finished() -> None:
     results = handle.results
     if results is None:
         return
-    # Already stashed? Avoid recomputing by only stashing if key missing /
-    # empty. Edge case: user starts a new run and _start_scrape clears the
-    # stash, so this block correctly re-populates it from the new handle.
-    if st.session_state.get(results_tabs.K_RUN_ITEMS):
+    # Already stashed? Check for key presence rather than truthiness —
+    # a completed run that returned 0 items stores ``[]`` which would
+    # otherwise fall through and re-stash on every render. ``_start_scrape``
+    # pops the key when a new run kicks off, so this guard correctly
+    # re-populates from the new handle without repeated work.
+    if results_tabs.K_RUN_ITEMS in st.session_state:
         return
     flat: list = []
     for r in results:
