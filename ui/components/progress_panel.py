@@ -29,6 +29,7 @@ from utils.async_bridge import JobHandle
 
 K_PROGRESS_SNAPSHOT = "progress_snapshot"
 K_JOB_HANDLE = "job_handle"
+K_FRAGMENT_SAW_FINISHED = "progress_fragment_saw_finished"
 
 
 @dataclass
@@ -89,6 +90,9 @@ def _ensure_snapshot() -> ProgressSnapshot:
 def reset_snapshot() -> None:
     """Called when the user kicks off a new run."""
     st.session_state[K_PROGRESS_SNAPSHOT] = ProgressSnapshot()
+    # Arm the "saw finished" sentinel so the fragment fires a full rerun
+    # exactly once when this fresh run transitions to the finished state.
+    st.session_state[K_FRAGMENT_SAW_FINISHED] = False
 
 
 def _overall_fraction(snap: ProgressSnapshot) -> float:
@@ -149,9 +153,18 @@ def _render_panel(snap: ProgressSnapshot, handle: JobHandle | None) -> None:
 def _live_fragment() -> None:
     snap = _ensure_snapshot()
     handle: JobHandle | None = st.session_state.get(K_JOB_HANDLE)
+    was_finished = st.session_state.get(K_FRAGMENT_SAW_FINISHED, False)
     if handle is not None:
         _apply_events(snap, handle.bus.drain())
     _render_panel(snap, handle)
+    # When a run transitions to finished from *inside* the fragment, the
+    # fragment rerun scope prevents the main dashboard's render() — and
+    # therefore ``_collect_items_if_finished`` + the Results tabs — from
+    # re-executing. Kick a full-page rerun exactly once so the Results
+    # section picks up the new items.
+    if snap.finished and not was_finished:
+        st.session_state[K_FRAGMENT_SAW_FINISHED] = True
+        st.rerun(scope="app")
 
 
 def render() -> None:
