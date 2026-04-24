@@ -25,7 +25,7 @@ from scraper.progress import (
     RunStarted,
     SourceFinished,
 )
-from scraper.runner import SourceRunResult, run_browser_source, run_layer1_source
+from scraper.runner import SourceRunResult, run_browser_source, run_url_params_source
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,7 @@ def run(
                     bus=bus,
                 )
             else:
-                result = run_layer1_source(
+                result = run_url_params_source(
                     src,
                     start_page=spec.start_page,
                     end_page=spec.end_page,

@@ -42,6 +42,7 @@ class Layer3Playwright:
 
     layer_number = 3
     name = "playwright"
+    parser_name = "bs4"
 
     def __init__(
         self,
