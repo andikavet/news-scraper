@@ -12,16 +12,23 @@ The orchestrator is completely decoupled from per-source config — the
 caller is responsible for translating ``source.enabled_layers`` into a
 concrete list of :class:`Layer` instances via :func:`build_layers_for_source`.
 
-Fallback triggers this iteration:
+Fallback triggers:
 
 - Layer raises ``ScrapeError`` (network error, non-2xx status, or anything
   else the layer considers fatal).
+- **Iter 9:** Layer returns a 2xx ``FetchResult`` whose HTML is a soft-block
+  (Cloudflare / captcha / access-denied interstitial). The orchestrator
+  consults an optional ``block_detector`` after every successful fetch;
+  if the detector says the page is a block, the attempt is treated
+  identically to a ``ScrapeError`` (retry same layer, then escalate).
 
-Deliberately **not** fallback triggers this iteration:
+Deliberately **not** a fallback trigger:
 
-- Layer returns 0 parsed hits. A truly-empty listing page would be
-  indistinguishable from a soft-blocked one; the "zero hits → escalate"
-  heuristic needs a block-detection signal (Iter 9).
+- Layer returns 0 parsed hits without any block signal. A truly-empty
+  listing page is indistinguishable from a healthy "no news today" page,
+  so 0-hits-alone is never enough to escalate. Callers that *do* want
+  0-hits to escalate should combine selectors + block keywords into
+  their own ``block_detector`` closure (see :mod:`scraper.block_detection`).
 
 Per-layer retries still apply *within* each step of the cascade — if the
 user configures ``max_retries=2`` and there are 3 enabled layers, the
@@ -38,6 +45,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from config import ScrapeSource
+from scraper.block_detection import BlockVerdict, detect_block
 from scraper.layers.base import FetchResult, ScrapeError
 from scraper.layers.layer1_httpx import Layer1Httpx
 from scraper.layers.layer2_selectolax import Layer2Selectolax
@@ -45,6 +53,7 @@ from scraper.layers.layer2_selectolax import Layer2Selectolax
 logger = logging.getLogger(__name__)
 
 Sleeper = Callable[[float], None]
+BlockDetector = Callable[[FetchResult], BlockVerdict]
 
 
 class _Fetcher(Protocol):
@@ -66,12 +75,25 @@ class OrchestratorResult:
 
 
 class FetchOrchestrator:
-    """Apply the layer cascade to a single URL."""
+    """Apply the layer cascade to a single URL.
 
-    def __init__(self, layers: list[_Fetcher]) -> None:
+    If ``block_detector`` is provided, each successful fetch is run through
+    it before the orchestrator commits to it. A positive verdict is
+    treated as a synthetic ``ScrapeError`` — the attempt counts against
+    the layer's retry budget, and the cascade escalates normally once the
+    budget is exhausted.
+    """
+
+    def __init__(
+        self,
+        layers: list[_Fetcher],
+        *,
+        block_detector: BlockDetector | None = None,
+    ) -> None:
         if not layers:
             raise ValueError("FetchOrchestrator requires at least one layer")
         self._layers: list[_Fetcher] = list(layers)
+        self._block_detector: BlockDetector | None = block_detector
 
     @property
     def layer_numbers(self) -> list[int]:
@@ -110,6 +132,23 @@ class FetchOrchestrator:
                     if attempt + 1 < attempts:
                         sleep(retry_backoff * (attempt + 1))
                     continue
+                # Iter 9 — soft-block check. A 2xx response whose body is a
+                # challenge/captcha page counts as a failed attempt so the
+                # orchestrator escalates to a stealthier layer.
+                if self._block_detector is not None:
+                    verdict = self._block_detector(fetched)
+                    if verdict.is_block:
+                        last_err = f"blocked: {verdict.signal} ({verdict.evidence!r})"
+                        logger.warning(
+                            "layer %s soft-blocked (attempt %d/%d): %s",
+                            layer.name,
+                            attempt + 1,
+                            attempts,
+                            verdict.signal,
+                        )
+                        if attempt + 1 < attempts:
+                            sleep(retry_backoff * (attempt + 1))
+                        continue
                 parser_name = getattr(layer, "parser_name", "bs4")
                 return (
                     OrchestratorResult(
@@ -145,11 +184,13 @@ def build_layers_for_source(source: ScrapeSource) -> list[_Fetcher]:
     separately by :mod:`scraper.playwright_session` and is not part of the
     fallback cascade.
 
-    Layer 4 is not implemented yet; it is silently skipped so an over-eager
-    user config does not crash the run.
+    Iter 9: Layer 4 (stealth Playwright) is now implemented. Unknown layer
+    numbers are still silently skipped so a forward-compatible config does
+    not crash the run.
     """
-    # Deferred import — Layer 3 pulls Playwright at import time.
+    # Deferred imports — Layer 3/4 pull Playwright at import time.
     from scraper.layers.layer3_playwright import Layer3Playwright
+    from scraper.layers.layer4_stealth import Layer4Stealth
 
     layers: list[_Fetcher] = []
     for layer_num in source.enabled_layers:
@@ -160,10 +201,7 @@ def build_layers_for_source(source: ScrapeSource) -> list[_Fetcher]:
         elif layer_num == 3:
             layers.append(Layer3Playwright())
         elif layer_num == 4:
-            logger.info(
-                "layer 4 requested for source %s but not implemented yet; skipping",
-                source.name,
-            )
+            layers.append(Layer4Stealth())
         else:
             logger.warning("unknown layer %s for source %s; skipping", layer_num, source.name)
     if not layers:
@@ -173,9 +211,17 @@ def build_layers_for_source(source: ScrapeSource) -> list[_Fetcher]:
     return layers
 
 
+def default_block_detector(fetched: FetchResult) -> BlockVerdict:
+    """Convenience adapter so callers can pass a bare function to the
+    orchestrator without having to thread selectors through."""
+    return detect_block(fetched.html)
+
+
 __all__ = [
+    "BlockDetector",
     "FetchOrchestrator",
     "OrchestratorResult",
     "Sleeper",
     "build_layers_for_source",
+    "default_block_detector",
 ]

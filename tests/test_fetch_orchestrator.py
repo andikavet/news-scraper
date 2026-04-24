@@ -191,20 +191,23 @@ def test_build_layers_for_source_respects_config_order_with_layers_1_and_2() -> 
     assert [getattr(layer, "parser_name", "bs4") for layer in layers] == ["bs4", "selectolax"]
 
 
-def test_build_layers_for_source_skips_layer_4_gracefully() -> None:
-    """Layer 4 isn't implemented yet; an enabled_layers that includes it
-    must still produce a usable cascade, not crash the run."""
+def test_build_layers_for_source_resolves_layer_4_stealth() -> None:
+    """Iter 9: Layer 4 is now a first-class layer and must be wired in."""
     # enabled_layers validator sorts + dedupes.
     layers = build_layers_for_source(_source([1, 4]))
-    # Only Layer 1 is instantiable today.
-    assert [layer.layer_number for layer in layers] == [1]
+    assert [layer.layer_number for layer in layers] == [1, 4]
 
 
 def test_build_layers_for_source_degrades_gracefully_when_all_unknown() -> None:
-    """If every configured layer is unknown/unimplemented, fall back to L1.
+    """If every configured layer is unknown, fall back to L1.
 
     A run is more useful than a crash — the user still gets SOMETHING to
-    look at and can fix their config.
+    look at and can fix their config. ``ScrapeSource.enabled_layers`` is
+    typed ``Literal[1, 2, 3, 4]`` so unknown layer numbers can only appear
+    if the config model is bypassed; we construct such a source directly
+    to exercise the safety net.
     """
-    layers = build_layers_for_source(_source([4]))
+    src = _source([1])
+    src = src.model_copy(update={"enabled_layers": [99]})  # type: ignore[arg-type]
+    layers = build_layers_for_source(src)
     assert [layer.layer_number for layer in layers] == [1]

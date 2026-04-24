@@ -37,7 +37,11 @@ from typing import TYPE_CHECKING, Protocol
 
 from config import ScrapeSource
 from scraper.date_parser import parse_scraped_date
-from scraper.fetch_orchestrator import FetchOrchestrator, build_layers_for_source
+from scraper.fetch_orchestrator import (
+    FetchOrchestrator,
+    build_layers_for_source,
+    default_block_detector,
+)
 from scraper.layers.base import FetchResult
 from scraper.models import NewsItem, RawScrapeHit
 from scraper.pagination import iter_page_requests
@@ -118,8 +122,14 @@ def _orchestrator_from_param(
     if orchestrator is not None:
         return orchestrator
     if fetcher is not None:
+        # Legacy single-fetcher path has no fallback AND no block detection
+        # so unit tests that drive the runner with a canned fetcher see
+        # unchanged behaviour.
         return FetchOrchestrator([fetcher])
-    return FetchOrchestrator(build_layers_for_source(source))
+    return FetchOrchestrator(
+        build_layers_for_source(source),
+        block_detector=default_block_detector,
+    )
 
 
 def _inrange(d: date | None, start: date, end: date | None) -> bool:
