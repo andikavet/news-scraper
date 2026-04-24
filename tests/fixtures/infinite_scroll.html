@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Infinite scroll fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 0; }
+  .spacer { height: 1000px; }
+  article { border-bottom: 1px solid #ccc; padding: 12px 16px; }
+  h3 { margin: 0 0 4px 0; }
+  time { color: #888; font-size: 12px; }
+  #sentinel { height: 1px; }
+</style>
+</head>
+<body>
+<main id="feed">
+  <!-- First batch is rendered server-side so the page is never empty. -->
+  <article class="news-card">
+    <h3><a href="https://example.test/articles/a1">Harga BBM dan pertanian naik</a></h3>
+    <time>22 Apr 2026</time>
+  </article>
+  <article class="news-card">
+    <h3><a href="https://example.test/articles/a2">Produksi pertanian stabil</a></h3>
+    <time>21 Apr 2026</time>
+  </article>
+</main>
+<div class="spacer"></div>
+<div id="sentinel"></div>
+<script>
+// Articles revealed via "infinite scroll". Each batch is 2 articles. To make
+// the dwell behaviour deterministic regardless of scroll-event count per
+// scrollTo, we use an IntersectionObserver on a bottom sentinel. Each time
+// the sentinel enters the viewport, one batch loads and the sentinel is
+// re-appended after a fresh large spacer — guaranteeing it falls off-screen
+// until the next scrollTo-to-bottom reveals it again.
+const BATCHES = [
+  [
+    {title: "Konsumsi rumah tangga naik", date: "20 Apr 2026", href: "https://example.test/articles/a3"},
+    {title: "Ekspor non-migas tumbuh", date: "19 Apr 2026", href: "https://example.test/articles/a4"},
+  ],
+  [
+    {title: "Impor pangan melambat", date: "18 Apr 2026", href: "https://example.test/articles/a5"},
+    {title: "Investasi semester I naik", date: "17 Apr 2026", href: "https://example.test/articles/a6"},
+  ],
+  [
+    {title: "Inflasi turun tipis", date: "16 Apr 2026", href: "https://example.test/articles/a7"},
+    {title: "APBN 2026 disahkan", date: "15 Apr 2026", href: "https://example.test/articles/a8"},
+  ],
+];
+let batchIndex = 0;
+const feed = document.getElementById("feed");
+const sentinel = document.getElementById("sentinel");
+
+function appendNextBatch() {
+  if (batchIndex >= BATCHES.length) return;
+  const batch = BATCHES[batchIndex++];
+  for (const item of batch) {
+    const art = document.createElement("article");
+    art.className = "news-card";
+    const h3 = document.createElement("h3");
+    const a = document.createElement("a");
+    a.href = item.href;
+    a.textContent = item.title;
+    h3.appendChild(a);
+    const t = document.createElement("time");
+    t.textContent = item.date;
+    art.appendChild(h3);
+    art.appendChild(t);
+    feed.appendChild(art);
+  }
+  // Add a fresh 1000px spacer and move the sentinel below it so the
+  // IntersectionObserver must wait for the next scroll-to-bottom before
+  // firing again.
+  const newSpacer = document.createElement("div");
+  newSpacer.className = "spacer";
+  document.body.appendChild(newSpacer);
+  document.body.appendChild(sentinel);
+}
+
+const observer = new IntersectionObserver((entries) => {
+  if (batchIndex >= BATCHES.length) return;
+  for (const entry of entries) {
+    if (entry.isIntersecting) {
+      appendNextBatch();
+      break;
+    }
+  }
+}, { threshold: 0 });
+observer.observe(sentinel);
+</script>
+</body>
+</html>

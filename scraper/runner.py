@@ -29,6 +29,7 @@ from __future__ import annotations
 import logging
 import random
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from datetime import date
 from typing import TYPE_CHECKING, Protocol
@@ -40,8 +41,16 @@ from scraper.layers.layer1_httpx import Layer1Httpx
 from scraper.models import NewsItem, RawScrapeHit
 from scraper.pagination import iter_page_requests
 from scraper.parsers import extract_items
+from scraper.playwright_session import (
+    BrowserSessionError,
+    browser_page,
+    iter_click_next_pages,
+    iter_infinite_scroll_pages,
+)
 
 if TYPE_CHECKING:
+    from playwright.sync_api import Page  # noqa: F401  (used in type hints only)
+
     from scraper.progress import ProgressBus
 
 logger = logging.getLogger(__name__)
@@ -258,9 +267,168 @@ def _default_sleep(seconds: float) -> None:
     time.sleep(seconds)
 
 
+# --------------------------------------------------------------------------- #
+# Browser-driven runner (Iter 7)
+# --------------------------------------------------------------------------- #
+
+
+def _process_page_hits(
+    hits: list[RawScrapeHit],
+    *,
+    source_name: str,
+    page: int,
+    reference: date,
+    time_range_start: date,
+    time_range_end: date | None,
+    stats: RunStats,
+    items: list[NewsItem],
+    seen_links: set[str],
+) -> tuple[int, bool]:
+    """Convert raw hits → NewsItems with dedup, update stats, return (new_in_range, early_stop).
+
+    Shared between the Layer 1 runner and the browser-driven runner. The
+    ``seen_links`` set is mutated in place so infinite-scroll callers don't
+    double-count items that were already captured in an earlier snapshot.
+    """
+    new_in_range = 0
+    oldest_seen_below_range = False
+    for hit in hits:
+        if hit.link in seen_links:
+            continue
+        seen_links.add(hit.link)
+        item = _hit_to_news_item(hit, source_name, page, reference)
+        stats.items_scanned += 1
+        if item.date_parsed is None:
+            stats.items_undated += 1
+        elif item.date_parsed < time_range_start:
+            oldest_seen_below_range = True
+
+        if _inrange(item.date_parsed, time_range_start, time_range_end):
+            items.append(item)
+            stats.items_in_range += 1
+            new_in_range += 1
+        else:
+            stats.items_out_of_range += 1
+    return new_in_range, oldest_seen_below_range
+
+
+def run_browser_source(
+    source: ScrapeSource,
+    start_page: int,
+    end_page: int,
+    time_range_start: date,
+    time_range_end: date | None = None,
+    *,
+    session_factory: Callable[[], AbstractContextManager[Page]] | None = None,  # type: ignore[name-defined]
+    reference_date: date | None = None,
+    bus: ProgressBus | None = None,
+) -> SourceRunResult:
+    """Drive a JS-rendered listing via Playwright for ``infinite_scroll`` or ``click_next``.
+
+    One browser session spans the whole run so intra-page state (scroll
+    position, next-button context, XHR cookies) is preserved across pages.
+    The runner consumes the page-snapshot iterator and applies the same
+    date-parse + in-range + early-stop logic as :func:`run_layer1_source`.
+
+    ``session_factory`` is exposed for tests that want to inject a fake
+    ``browser_page`` context manager (e.g. file:// fixture URL) without
+    duplicating navigation logic.
+    """
+    if start_page < 1 or end_page < start_page:
+        raise ValueError(f"invalid page range: start_page={start_page} end_page={end_page}")
+    if source.pagination_type not in ("infinite_scroll", "click_next"):
+        raise ValueError(
+            f"run_browser_source called with pagination_type={source.pagination_type!r}; "
+            "expected 'infinite_scroll' or 'click_next'"
+        )
+
+    ref = reference_date if reference_date is not None else date.today()
+    stats = RunStats(source_name=source.name)
+    items: list[NewsItem] = []
+    seen_links: set[str] = set()
+    total_pages = end_page - start_page + 1
+
+    if bus is not None:
+        from scraper.progress import SourceStarted
+
+        bus.emit(SourceStarted(source_name=source.name, total_pages=total_pages))
+
+    def _should_stop() -> bool:
+        return bus is not None and bus.is_cancelled()
+
+    session_cm = session_factory() if session_factory is not None else browser_page()
+
+    initial_url = source.url_template.replace("{page}", str(start_page))
+
+    try:
+        with session_cm as page:
+            if source.pagination_type == "infinite_scroll":
+                page_iter = iter_infinite_scroll_pages(
+                    page,
+                    url=initial_url,
+                    start_page=start_page,
+                    end_page=end_page,
+                    scrolls_per_page=source.scrolls_per_page,
+                    should_stop=_should_stop,
+                )
+            else:
+                page_iter = iter_click_next_pages(
+                    page,
+                    url=initial_url,
+                    next_button_selector=source.selectors.next_button,
+                    start_page=start_page,
+                    end_page=end_page,
+                    should_stop=_should_stop,
+                )
+
+            for snap in page_iter:
+                if _should_stop():
+                    logger.info("source %s: cancelled before page %d", source.name, snap.page)
+                    break
+                hits = extract_items(snap.html, source.selectors)
+                stats.pages_scanned += 1
+                new_in_range, oldest_seen_below_range = _process_page_hits(
+                    hits,
+                    source_name=source.name,
+                    page=snap.page,
+                    reference=ref,
+                    time_range_start=time_range_start,
+                    time_range_end=time_range_end,
+                    stats=stats,
+                    items=items,
+                    seen_links=seen_links,
+                )
+                if bus is not None:
+                    from scraper.progress import PageFetched
+
+                    bus.emit(
+                        PageFetched(
+                            source_name=source.name,
+                            page=snap.page,
+                            items_scanned=len(hits),
+                            items_in_range=new_in_range,
+                        )
+                    )
+                if oldest_seen_below_range:
+                    stats.early_stopped = True
+                    logger.info(
+                        "source %s: early-stopping at page %d (saw date below range start)",
+                        source.name,
+                        snap.page,
+                    )
+                    break
+    except BrowserSessionError as e:
+        logger.error("source %s: browser session failed: %s", source.name, e)
+        stats.pages_failed += 1
+        stats.errors.append(f"browser session failed: {e}")
+
+    return SourceRunResult(items=items, stats=stats)
+
+
 __all__ = [
     "RunStats",
     "Sleeper",
     "SourceRunResult",
+    "run_browser_source",
     "run_layer1_source",
 ]

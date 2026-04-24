@@ -3,11 +3,9 @@
 A pagination strategy knows how to turn a configured source's ``url_template``
 + current page number into either:
 - A concrete URL to fetch (for ``url_params``), or
-- A driver-level operation (scroll / click next) — those strategies are stubs
-  here and fully implemented in Iter 7 alongside the Playwright layers.
-
-Only ``url_params`` is functional at this iteration because Layer 1 cannot
-drive a browser.
+- A driver-level operation (scroll / click next) — these strategies are
+  driven by :mod:`scraper.playwright_session` rather than being expressed
+  as page requests because they require persistent browser state.
 """
 
 from __future__ import annotations
@@ -18,9 +16,11 @@ from config import ScrapeSource
 
 
 class PaginationNotSupportedError(RuntimeError):
-    """Raised when a pagination strategy requires a layer that's not wired yet.
+    """Raised when ``iter_page_requests`` is asked to handle a non-URL strategy.
 
-    Iter 7 wires ``infinite_scroll`` and ``click_next`` via Playwright.
+    JS-driven strategies (``infinite_scroll`` / ``click_next``) are handled
+    by the browser runner, not by URL iteration. See
+    :func:`scraper.runner.run_browser_source`.
     """
 
 
@@ -45,16 +45,25 @@ def url_for_page(source: ScrapeSource, page: int) -> str:
     return template.replace("{page}", str(page))
 
 
+def needs_browser(source: ScrapeSource) -> bool:
+    """Return True when the source requires a live browser to paginate.
+
+    ``infinite_scroll`` and ``click_next`` need persistent JS/DOM state
+    across pages; ``url_params`` is plain HTTP and can stay on Layer 1.
+    """
+    return source.pagination_type in ("infinite_scroll", "click_next")
+
+
 def iter_page_requests(source: ScrapeSource, start_page: int, end_page: int):
     """Yield ``PageRequest``s for ``url_params`` sources in ``[start_page, end_page]``.
 
     Raises ``PaginationNotSupportedError`` for strategies that require a
-    browser. Those are handled by the Playwright runner in Iter 7.
+    browser. Those are handled by :func:`scraper.runner.run_browser_source`.
     """
     if source.pagination_type != "url_params":
         raise PaginationNotSupportedError(
-            f"Pagination type {source.pagination_type!r} needs a Playwright layer "
-            "(Iteration 7). Layer 1 only supports 'url_params'."
+            f"Pagination type {source.pagination_type!r} requires a browser session; "
+            "use scraper.runner.run_browser_source instead."
         )
     if start_page > end_page:
         return
@@ -66,5 +75,6 @@ __all__ = [
     "PageRequest",
     "PaginationNotSupportedError",
     "iter_page_requests",
+    "needs_browser",
     "url_for_page",
 ]

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<title>Click-next fixture</title>
+<style>
+  body { font-family: sans-serif; margin: 16px; }
+  article { border-bottom: 1px solid #ccc; padding: 12px 0; }
+  h3 { margin: 0 0 4px 0; }
+  time { color: #888; font-size: 12px; }
+  #next { margin-top: 16px; padding: 8px 16px; }
+  #next[disabled] { opacity: 0.4; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<main id="feed"></main>
+<button id="next" data-testid="next-page">Next Page</button>
+<script>
+// Three pages, two articles per page.
+const PAGES = [
+  [
+    {title: "Page 1 item — Harga BBM dan pertanian naik", date: "22 Apr 2026", href: "https://example.test/p1/a1"},
+    {title: "Page 1 item — Produksi pertanian stabil", date: "21 Apr 2026", href: "https://example.test/p1/a2"},
+  ],
+  [
+    {title: "Page 2 item — Konsumsi rumah tangga naik", date: "20 Apr 2026", href: "https://example.test/p2/a3"},
+    {title: "Page 2 item — Ekspor non-migas tumbuh", date: "19 Apr 2026", href: "https://example.test/p2/a4"},
+  ],
+  [
+    {title: "Page 3 item — Impor pangan melambat", date: "18 Apr 2026", href: "https://example.test/p3/a5"},
+    {title: "Page 3 item — Investasi semester I naik", date: "17 Apr 2026", href: "https://example.test/p3/a6"},
+  ],
+];
+let pageIndex = 0;
+const feed = document.getElementById("feed");
+const nextBtn = document.getElementById("next");
+function render() {
+  feed.innerHTML = "";
+  for (const item of PAGES[pageIndex]) {
+    const art = document.createElement("article");
+    art.className = "news-card";
+    const h3 = document.createElement("h3");
+    const a = document.createElement("a");
+    a.href = item.href;
+    a.textContent = item.title;
+    h3.appendChild(a);
+    const t = document.createElement("time");
+    t.textContent = item.date;
+    art.appendChild(h3);
+    art.appendChild(t);
+    feed.appendChild(art);
+  }
+  if (pageIndex >= PAGES.length - 1) {
+    nextBtn.disabled = true;
+  }
+}
+nextBtn.addEventListener("click", () => {
+  if (pageIndex < PAGES.length - 1) {
+    pageIndex++;
+    render();
+  }
+});
+render();
+</script>
+</body>
+</html>
