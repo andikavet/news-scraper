@@ -64,7 +64,7 @@ class _AllPagesFetcher:
 
 def _patch_layer1():
     """Context patching Layer1Httpx so no real HTTP happens during engine tests."""
-    return mock.patch("scraper.runner.Layer1Httpx", return_value=_AllPagesFetcher())
+    return mock.patch("scraper.fetch_orchestrator.Layer1Httpx", return_value=_AllPagesFetcher())
 
 
 def test_engine_runs_each_enabled_source_once_and_preserves_order():
@@ -136,7 +136,7 @@ def test_engine_preserves_order_even_when_workers_finish_out_of_order():
         time_range_start=date(2026, 1, 1),
         time_range_end=date(2026, 1, 31),
     )
-    with mock.patch("scraper.runner.Layer1Httpx", return_value=SlowFirstFetcher()):
+    with mock.patch("scraper.fetch_orchestrator.Layer1Httpx", return_value=SlowFirstFetcher()):
         results = engine.run(spec, max_workers=2)
 
     assert [r.stats.source_name for r in results] == ["Alpha", "Beta"]
@@ -182,7 +182,7 @@ def test_engine_cancellation_stops_new_pages():
         time_range_start=date(2026, 1, 1),
         time_range_end=date(2026, 1, 31),
     )
-    with mock.patch("scraper.runner.Layer1Httpx", return_value=fetcher):
+    with mock.patch("scraper.fetch_orchestrator.Layer1Httpx", return_value=fetcher):
         engine.run(spec, bus=bus, max_workers=1)
 
     # At most 1 extra fetch may slip through because the cancel flag is

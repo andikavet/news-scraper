@@ -1,16 +1,17 @@
 """Per-source scraping loop.
 
-Runs one configured ``ScrapeSource`` through Layer 1 (``httpx`` + BeautifulSoup),
-iterates pages via the ``url_params`` pagination strategy, parses dates, and
-short-circuits (*early-stops*) as soon as a parsed article date falls below
-the user-selected time range start. Returns the collected ``NewsItem``s plus
-a ``RunStats`` record summarizing what happened.
+Runs one configured ``ScrapeSource`` through the Layer cascade
+(``FetchOrchestrator``), iterates pages via the ``url_params`` pagination
+strategy, parses dates, and short-circuits (*early-stops*) as soon as a
+parsed article date falls below the user-selected time range start. Returns
+the collected ``NewsItem``s plus a ``RunStats`` record summarizing what
+happened — including which layer delivered each page.
 
 Design notes / tradeoffs:
 
-- Retries are **per-fetch** only. A page that fails all retries is logged and
-  the loop continues to the next page — one bad page must never kill the
-  whole source, per PRD §2.4.
+- Retries are **per-layer** and stack with fallback: the orchestrator retries
+  each layer ``max_retries + 1`` times before escalating, and only declares
+  a page failed once every enabled layer has exhausted its attempts.
 - Sleep between successful page fetches is sampled uniformly from
   ``source.sleep`` — light rate-limiting to avoid hammering the origin.
 - Items with an unparseable ``date_raw`` are **kept** (the user wants to see
@@ -36,11 +37,11 @@ from typing import TYPE_CHECKING, Protocol
 
 from config import ScrapeSource
 from scraper.date_parser import parse_scraped_date
-from scraper.layers.base import FetchResult, ScrapeError
-from scraper.layers.layer1_httpx import Layer1Httpx
+from scraper.fetch_orchestrator import FetchOrchestrator, build_layers_for_source
+from scraper.layers.base import FetchResult
 from scraper.models import NewsItem, RawScrapeHit
 from scraper.pagination import iter_page_requests
-from scraper.parsers import extract_items
+from scraper.parsers import extract_items, parse_for
 from scraper.playwright_session import (
     BrowserSessionError,
     browser_page,
@@ -83,6 +84,10 @@ class RunStats:
     items_undated: int = 0
     early_stopped: bool = False
     errors: list[str] = field(default_factory=list)
+    # Iter 8: count of successfully-fetched pages per layer number. Lets the
+    # user see at a glance "all 12 pages were served by Layer 1" vs "Layer 1
+    # bounced 8 of them and Layer 2 picked up the slack".
+    layer_usage: dict[int, int] = field(default_factory=dict)
 
 
 @dataclass
@@ -96,31 +101,25 @@ class SourceRunResult:
 # --------------------------------------------------------------------------- #
 
 
-def _fetch_with_retries(
-    fetcher: _Fetcher,
-    url: str,
-    max_retries: int,
-    sleep: Sleeper,
-    retry_backoff: float = 2.0,
-) -> FetchResult | None:
-    """Try ``fetch`` up to ``max_retries + 1`` times; return None on final failure.
+def _orchestrator_from_param(
+    orchestrator: FetchOrchestrator | None,
+    fetcher: _Fetcher | None,
+    source: ScrapeSource,
+) -> FetchOrchestrator:
+    """Resolve the caller-supplied orchestrator / legacy fetcher into a concrete orchestrator.
 
-    Sleep between retries grows linearly (1x, 2x, 3x ``retry_backoff``).
+    Priority:
+    1. ``orchestrator`` if given — used as-is.
+    2. ``fetcher`` (single layer, legacy callers / tests) — wrapped in a
+       1-layer orchestrator, no fallback.
+    3. Neither — build from ``source.enabled_layers`` via
+       :func:`build_layers_for_source`.
     """
-    attempts = max_retries + 1
-    last_err: str | None = None
-    for attempt in range(attempts):
-        try:
-            return fetcher.fetch(url)
-        except ScrapeError as e:
-            last_err = str(e)
-            logger.warning(
-                "layer %s fetch failed (attempt %d/%d): %s", fetcher.name, attempt + 1, attempts, e
-            )
-            if attempt + 1 < attempts:
-                sleep(retry_backoff * (attempt + 1))
-    logger.error("all %d attempts failed for %s: %s", attempts, url, last_err)
-    return None
+    if orchestrator is not None:
+        return orchestrator
+    if fetcher is not None:
+        return FetchOrchestrator([fetcher])
+    return FetchOrchestrator(build_layers_for_source(source))
 
 
 def _inrange(d: date | None, start: date, end: date | None) -> bool:
@@ -149,30 +148,40 @@ def _hit_to_news_item(
     )
 
 
-def run_layer1_source(
+def run_url_params_source(
     source: ScrapeSource,
     start_page: int,
     end_page: int,
     time_range_start: date,
     time_range_end: date | None = None,
     *,
+    orchestrator: FetchOrchestrator | None = None,
     fetcher: _Fetcher | None = None,
     sleeper: Sleeper | None = None,
     rng: random.Random | None = None,
     reference_date: date | None = None,
     bus: ProgressBus | None = None,
 ) -> SourceRunResult:
-    """Scrape one source end-to-end via Layer 1.
+    """Scrape one ``url_params`` source end-to-end, with Layer 1 → N fallback.
 
-    Parameters beyond the source/config are injectable so the runner is fully
-    unit-testable without touching the network or the wall clock. If ``bus``
-    is provided, lifecycle events are emitted and the runner checks
+    For each page, the :class:`FetchOrchestrator` tries every enabled layer
+    (in config order) before giving up. Whichever layer succeeds first is
+    recorded in :attr:`RunStats.layer_usage` and attached to the
+    :class:`~scraper.progress.PageFetched` event.
+
+    Parameters beyond the source/config are injectable so the runner is
+    fully unit-testable without touching the network or the wall clock. If
+    ``bus`` is provided, lifecycle events are emitted and the runner checks
     ``bus.is_cancelled()`` before fetching each page.
+
+    Backward-compat: passing ``fetcher=`` wraps a single layer in a
+    1-element orchestrator (no fallback). This keeps the Iter 3 tests that
+    drive the runner with a canned ``_FakeFetcher`` working unchanged.
     """
     if start_page < 1 or end_page < start_page:
         raise ValueError(f"invalid page range: start_page={start_page} end_page={end_page}")
 
-    fetcher = fetcher if fetcher is not None else Layer1Httpx()
+    orch = _orchestrator_from_param(orchestrator, fetcher, source)
     sleep = sleeper if sleeper is not None else _default_sleep
     rng = rng if rng is not None else random.Random()
     ref = reference_date if reference_date is not None else date.today()
@@ -191,16 +200,17 @@ def run_layer1_source(
             logger.info("source %s: cancelled before page %d", source.name, req.page)
             break
 
-        fetched = _fetch_with_retries(
-            fetcher=fetcher,
+        outcome, per_layer_errors = orch.fetch_with_fallback(
             url=req.url,
             max_retries=source.max_retries,
             sleep=sleep,
         )
         stats.pages_scanned += 1
-        if fetched is None:
+        if outcome is None:
             stats.pages_failed += 1
-            stats.errors.append(f"page {req.page}: all retries failed")
+            stats.errors.append(
+                f"page {req.page}: all layers failed ({'; '.join(per_layer_errors)})"
+            )
             if bus is not None:
                 from scraper.progress import PageFailed
 
@@ -208,12 +218,14 @@ def run_layer1_source(
                     PageFailed(
                         source_name=source.name,
                         page=req.page,
-                        error=f"all {source.max_retries + 1} attempts failed",
+                        error="all enabled layers failed",
                     )
                 )
             continue
 
-        hits = extract_items(fetched.html, source.selectors)
+        stats.layer_usage[outcome.layer_number] = stats.layer_usage.get(outcome.layer_number, 0) + 1
+
+        hits = parse_for(outcome.parser_name, outcome.fetched.html, source.selectors)
         stats.items_scanned += len(hits)
 
         page_in_range = 0
@@ -241,6 +253,7 @@ def run_layer1_source(
                     page=req.page,
                     items_scanned=len(hits),
                     items_in_range=page_in_range,
+                    layer_used=outcome.layer_number,
                 )
             )
 
@@ -258,6 +271,13 @@ def run_layer1_source(
             sleep(rng.uniform(source.sleep.min, source.sleep.max))
 
     return SourceRunResult(items=items, stats=stats)
+
+
+#: Backward-compat alias. Iter 3 tests and the pre-Iter-8 engine entry point
+#: called this ``run_layer1_source``; the name was always a misnomer (the
+#: function could run any Layer-shaped fetcher) so the Iter 8 rename makes
+#: it explicit. Existing call-sites continue to work without edits.
+run_layer1_source = run_url_params_source
 
 
 def _default_sleep(seconds: float) -> None:
@@ -430,5 +450,6 @@ __all__ = [
     "Sleeper",
     "SourceRunResult",
     "run_browser_source",
-    "run_layer1_source",
+    "run_layer1_source",  # back-compat alias for run_url_params_source
+    "run_url_params_source",
 ]

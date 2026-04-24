@@ -22,6 +22,7 @@ class Layer1Httpx:
 
     layer_number = 1
     name = "httpx+bs4"
+    parser_name = "bs4"
 
     def __init__(self, user_agent: str = _DEFAULT_UA) -> None:
         self._user_agent = user_agent

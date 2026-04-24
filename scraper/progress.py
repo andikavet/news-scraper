@@ -46,6 +46,10 @@ class PageFetched:
     page: int
     items_scanned: int
     items_in_range: int
+    # Iter 8: which layer delivered this page. ``None`` for the browser
+    # runner (``run_browser_source``) where the persistent Playwright
+    # session is not part of the single-shot fallback cascade.
+    layer_used: int | None = None
 
 
 @dataclass(frozen=True)

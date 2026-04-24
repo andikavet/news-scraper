@@ -55,7 +55,7 @@ def test_start_engine_thread_returns_immediately():
         time_range_start=date(2026, 1, 1),
         time_range_end=date(2026, 1, 31),
     )
-    with mock.patch("scraper.runner.Layer1Httpx", return_value=_Fast()):
+    with mock.patch("scraper.fetch_orchestrator.Layer1Httpx", return_value=_Fast()):
         t0 = time.monotonic()
         handle = start_engine_thread(spec)
         # The call itself should be basically instant.
@@ -88,7 +88,7 @@ def test_start_engine_thread_cancellation():
         time_range_start=date(2026, 1, 1),
         time_range_end=date(2026, 1, 31),
     )
-    with mock.patch("scraper.runner.Layer1Httpx", return_value=Slow()):
+    with mock.patch("scraper.fetch_orchestrator.Layer1Httpx", return_value=Slow()):
         handle = start_engine_thread(spec)
         # Wait until at least one worker has started fetching before cancelling.
         started.wait(timeout=2.0)
@@ -120,7 +120,7 @@ def test_start_engine_thread_captures_worker_exceptions():
         time_range_start=date(2026, 1, 1),
         time_range_end=date(2026, 1, 31),
     )
-    with mock.patch("scraper.runner.Layer1Httpx", return_value=Explosive()):
+    with mock.patch("scraper.fetch_orchestrator.Layer1Httpx", return_value=Explosive()):
         handle = start_engine_thread(spec)
         handle.wait(timeout=5.0)
 
