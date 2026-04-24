@@ -1,22 +1,38 @@
 """Section D of the Main Dashboard — results surfacing.
 
-Iter 5 renders:
-    - **Raw Data** tab: read-only ``st.dataframe`` of every scraped item.
-    - **One tab per categorizer grouping**: exploded (1 row per matched
-      category) frame rendered as read-only ``st.dataframe`` for now.
-      Editable ``st.data_editor`` + pivot tables land in Iter 6.
+Iter 5 rendered Raw Data + per-grouping exploded frames as read-only dataframes.
+Iter 6 upgrades to:
+    - Each grouping tab is now an editable ``st.data_editor`` — the user can
+      correct a miscategorized row, delete noise, or rename a Source inline.
+    - Below each editor sits a **Source × Category** pivot table that shows
+      every configured category as a column (reindexed on full category list)
+      even if zero rows matched. Empty categories are visible 0-columns.
+    - An **Update Pivot** button per grouping re-builds the pivot from the
+      **currently-edited** data_editor state. Until clicked, the pivot stays
+      pinned to the last snapshot so keystroke-level edits don't thrash.
 
-The categorization is re-run on every page render from the currently
-configured rules, so editing a grouping in Settings and coming back to the
-dashboard reflects the new rules against the already-scraped items — no
-re-scrape required.
+The initial auto-categorization still runs from the currently-configured rules
+on every page render, so editing a grouping in Settings and coming back
+reflects the new rules against the already-scraped items — no re-scrape
+required (preserved from Iter 5).
+
+Session-state keys used here:
+    - K_RUN_ITEMS: list[NewsItem] stashed after a completed run (Iter 5).
+    - K_EDITOR_FRAME_PREFIX + grouping name: the user's edited frame for
+      that grouping, carried across reruns so their edits don't get
+      clobbered on every fragment tick.
+    - K_PIVOT_SNAPSHOT_PREFIX + grouping name: the last pivot the user
+      explicitly asked to build via the Update Pivot button.
 """
 
 from __future__ import annotations
 
+import pandas as pd
 import streamlit as st
 
 from categorizer import (
+    GROUPING_COLUMNS,
+    build_pivot,
     categorize_items_to_frame,
     items_to_raw_dataframe,
 )
@@ -24,11 +40,17 @@ from config import AppSettings, CategorizerGrouping
 from scraper.models import NewsItem
 
 K_RUN_ITEMS = "run_items"  # list[NewsItem] — stashed after each completed run
+K_EDITOR_FRAME_PREFIX = "results_editor_frame__"
+K_EDITOR_AUTO_SOURCE_PREFIX = "results_editor_auto_source__"
+K_PIVOT_SNAPSHOT_PREFIX = "results_pivot_snapshot__"
 
 
 def stash_items(items: list[NewsItem]) -> None:
     """Main Dashboard calls this once a run completes."""
     st.session_state[K_RUN_ITEMS] = items
+    # Any previously-cached editor frames / pivot snapshots reflect the *old*
+    # items; wipe them so the new run starts from a fresh auto-categorization.
+    _clear_all_grouping_caches()
 
 
 def get_stashed_items() -> list[NewsItem]:
@@ -40,6 +62,49 @@ def get_stashed_items() -> list[NewsItem]:
 
 def clear_stashed_items() -> None:
     st.session_state.pop(K_RUN_ITEMS, None)
+    _clear_all_grouping_caches()
+
+
+def _clear_all_grouping_caches() -> None:
+    for key in list(st.session_state.keys()):
+        if isinstance(key, str) and (
+            key.startswith(K_EDITOR_FRAME_PREFIX)
+            or key.startswith(K_EDITOR_AUTO_SOURCE_PREFIX)
+            or key.startswith(K_PIVOT_SNAPSHOT_PREFIX)
+        ):
+            st.session_state.pop(key, None)
+
+
+def _editor_frame_key(grouping_name: str) -> str:
+    return K_EDITOR_FRAME_PREFIX + grouping_name
+
+
+def _auto_source_key(grouping_name: str) -> str:
+    """Hash of the auto-categorization inputs that produced the editor frame.
+
+    If rules or global excludes change (edited in Settings), this hash
+    changes and we re-seed the editor from fresh auto-categorization rather
+    than carrying stale edits forward.
+    """
+    return K_EDITOR_AUTO_SOURCE_PREFIX + grouping_name
+
+
+def _pivot_snapshot_key(grouping_name: str) -> str:
+    return K_PIVOT_SNAPSHOT_PREFIX + grouping_name
+
+
+def _auto_source_fingerprint(
+    grouping: CategorizerGrouping, app_settings: AppSettings, items_len: int
+) -> tuple:
+    """Small tuple that changes iff the auto-categorization inputs changed."""
+    rule_fp = tuple(
+        (r.category, tuple(r.include_tokens), tuple(r.exclude_tokens)) for r in grouping.rules
+    )
+    return (
+        items_len,
+        rule_fp,
+        tuple(app_settings.overall_exclude_tokens),
+    )
 
 
 def _render_raw_tab(items: list[NewsItem]) -> None:
@@ -64,17 +129,68 @@ def _render_grouping_tab(
         )
         return
 
-    df = categorize_items_to_frame(
+    auto_df = categorize_items_to_frame(
         items,
         grouping,
         global_excludes=app_settings.overall_exclude_tokens,
     )
-    n_items_matched = df["Title"].nunique() if not df.empty else 0
+    fingerprint = _auto_source_fingerprint(grouping, app_settings, len(items))
+    auto_source_k = _auto_source_key(grouping.name)
+    editor_k = _editor_frame_key(grouping.name)
+
+    # (Re-)seed the editor frame when rules change or on first render.
+    if st.session_state.get(auto_source_k) != fingerprint:
+        st.session_state[auto_source_k] = fingerprint
+        st.session_state[editor_k] = auto_df.copy()
+        # Any previous pivot snapshot is now stale.
+        st.session_state.pop(_pivot_snapshot_key(grouping.name), None)
+
+    edited_df: pd.DataFrame = st.session_state[editor_k]
+    n_items_matched = edited_df["Title"].nunique() if not edited_df.empty else 0
     st.caption(
-        f"{len(df)} row(s) across {n_items_matched} unique article(s) · "
+        f"{len(edited_df)} row(s) across {n_items_matched} unique article(s) · "
         f"{len(grouping.rules)} rule(s) in this grouping"
     )
-    st.dataframe(df, use_container_width=True, hide_index=True)
+
+    new_edited = st.data_editor(
+        edited_df,
+        use_container_width=True,
+        hide_index=True,
+        num_rows="dynamic",
+        key=f"data_editor__{grouping.name}",
+        column_config={
+            "Category": st.column_config.TextColumn("Category", required=True),
+            "Date": st.column_config.TextColumn("Date"),
+            "Source": st.column_config.TextColumn("Source", required=True),
+            "Title": st.column_config.TextColumn("Title", width="large"),
+            "Link": st.column_config.LinkColumn("Link"),
+            "Page": st.column_config.NumberColumn("Page", min_value=1, step=1),
+        },
+    )
+    # Streamlit already rerenders on every edit; we persist the latest
+    # snapshot so the frame survives reruns triggered by other widgets.
+    st.session_state[editor_k] = new_edited
+
+    st.markdown("##### Pivot: Source × Category")
+    pivot_col, btn_col = st.columns([1, 0.22])
+    with btn_col:
+        update_clicked = st.button(
+            "Update Pivot",
+            key=f"update_pivot__{grouping.name}",
+            use_container_width=True,
+            help="Rebuild the pivot from the currently-edited rows above.",
+        )
+
+    pivot_snap_k = _pivot_snapshot_key(grouping.name)
+    if update_clicked or pivot_snap_k not in st.session_state:
+        st.session_state[pivot_snap_k] = build_pivot(new_edited, grouping)
+
+    pivot_df: pd.DataFrame = st.session_state[pivot_snap_k]
+    with pivot_col:
+        if pivot_df.empty:
+            st.caption("No rows to pivot yet — edit the table above or click **Update Pivot**.")
+        else:
+            st.dataframe(pivot_df, use_container_width=True)
 
 
 def render(
@@ -100,6 +216,9 @@ def render(
 
 
 __all__ = [
+    "GROUPING_COLUMNS",
+    "K_EDITOR_FRAME_PREFIX",
+    "K_PIVOT_SNAPSHOT_PREFIX",
     "K_RUN_ITEMS",
     "clear_stashed_items",
     "get_stashed_items",
