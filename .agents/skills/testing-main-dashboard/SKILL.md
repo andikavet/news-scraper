@@ -69,6 +69,13 @@ Overwrite with one or more sources pointing at the fixture server. Use `sleep={m
 
 **Always revert to `{"sources": []}` after testing** — do not commit this file. Same for `config/categorizers.json` (→ `{"groupings": []}`) and `config/app_settings.yaml` (→ `overall_exclude_tokens: []`). `git checkout -- config/sources.json config/categorizers.json config/app_settings.yaml` is the fast way.
 
+Schema gotchas that will cause a `pydantic ValidationError` on dashboard load (and make the whole page red):
+- `selectors.container` (not `item_container`).
+- `sleep.min` / `sleep.max` (not `min_seconds` / `max_seconds`).
+- `enabled_layers` must be a non-empty list; `[4]` alone degrades silently to `[1]` via `build_layers_for_source` (Layer 4 not implemented).
+
+Streamlit re-reads `config/sources.json` on every render, so you can swap the file between test runs and just press F5 — no need to restart Streamlit.
+
 ### 3. Run the app
 
 ```bash
@@ -106,74 +113,114 @@ Then seed `config/sources.json` with `enabled_layers=[3]` and `pagination_type` 
   "url_template": "http://127.0.0.1:8766/click_next.html",
   "selectors": {"container": "article.news-card", "title": "h3 a", "link": "h3 a", "date": "time", "next_button": "#next"},
   "enabled_layers": [3], "scrolls_per_page": 1,
-  "sleep": {"min": 0.0, "max": 0.0}, "max_retries": 0, "avg_page_per_month": 3, "enabled": true
+  "avg_page_per_month": 10, "sleep": {"min": 0.0, "max": 0.0}, "max_retries": 0, "enabled": true
 }
 ```
 
-`infinite_scroll` sources use `pagination_type="infinite_scroll"`, `next_button=null`, and a `scrolls_per_page` ≥ 1 (one scroll per yielded snapshot).
+End Page comes from `max(end_page)` across all selected sources (see `ui/pages/main_dashboard.py`) — so per-source rows share a single `/N` denominator. When writing test assertions, pin the **items count**, not the `/N` — the latter is source-selection-dependent.
 
-### Expected shape on Main Dashboard completion
+## Discriminating-UA fixture server (proving fallback cascades)
 
-- `click_next` fixture has 3 pages with `#next` disabled on page 3 — setting End=10 proves early-stop: the row reads `ClickNextSite — 3/<envelope> pages · 6 items in range`.
-- `infinite_scroll` fixture has initial 2 articles + 3 JS batches of 2 = 8 unique items. With dedup-by-link across cumulative snapshots, End=4 yields 8 items (not 2+4+6+8=20).
-- Time range: a Custom range like `15 Apr 2026 → 22 Apr 2026` covers all fixture dates, or just use `This Month` when the current date is April 2026.
+When testing code that picks between two code paths based on an outbound header (e.g. Layer 1 uses desktop-Chrome UA, Layer 2 uses mobile iOS Safari UA), a fixture that 403s one UA and 200s the other is the cleanest adversarial proof of the cascade. Pair it with a control run where only the "blocked" layer is enabled to prove the fixture truly blocks.
 
-### Gotcha — per-source End vs shared envelope
+```python
+# /home/ubuntu/test-plans/fixture_server_ua.py
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
-`ui/pages/main_dashboard.py` takes `end_page = max(s.end_page for s in picked)` across all selected sources and passes that single value into `EngineRunSpec`. So if you select `ClickNextSite` (End=10) and `InfiniteScrollSite` (End=4), **both** per-source rows display `/10` in the pages denominator, and the infinite_scroll runner iterates 10 "pages" (yielding duplicate snapshots which dedup to 8 unique items). Plan your assertions around the **items count**, not the pages denominator. Per-source End bounds are flagged in code as Iter 9 work.
+FIXTURE = Path("/home/ubuntu/repos/news-scraper/tests/fixtures/portalx_listing.html").read_text()
+LOG = Path("/home/ubuntu/test-plans/fixture_server_ua.log")
+LOG.write_text("")  # truncate on start
 
-## Reference: exact widget keys & texts
+DISCRIMINATOR = "iPhone"  # substring to match the "preferred" UA
 
-- Time range radio: key `tr_main_preset`, options `This Month | Last Month | Year to Date | This Year | Custom`
-- Source-row checkbox: key `ss_main_<sourcename>_checked`
-- Source Start/End inputs: keys `ss_main_<sourcename>_start` / `ss_main_<sourcename>_end`
-- Start Scraping: key `start_scrape_btn` (primary button, disabled while run in progress)
-- Stop: key `progress_panel_stop` (only rendered while `handle.is_running()`)
-- Completion banner: `Run complete. N items in range.` (✅)
-- Cancelled banner: `Run cancelled. Collected N items before stopping.` (⏹️)
-- Overall progress text format: `Overall: Running · X/Y sources done (Z%)` / `Overall: Completed (100%)` / `Overall: Cancelled (Z%)`
-- Per-source bar format: `**<name>** — D/T pages · I items in range`
-- Results tabs: `Raw Data` + one per grouping (Section D)
-- Grouping-tab editor caption format (Iter 5+): `N row(s) across M unique article(s) · K rule(s) in this grouping`
-- Update Pivot button (Iter 6+): key `update_pivot__<grouping name>`, located to the right of the Source × Category pivot
+class H(BaseHTTPRequestHandler):
+    def do_GET(self):
+        ua = self.headers.get("User-Agent", "")
+        with LOG.open("a") as f: f.write(f"{self.path}\t{ua}\n")
+        body = FIXTURE.encode() if DISCRIMINATOR in ua else b"403 blocked"
+        code = 200 if DISCRIMINATOR in ua else 403
+        self.send_response(code)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+    def log_message(self, *a, **k): pass
 
-## Reference: interacting with `st.data_editor` cells
+ThreadingHTTPServer(("127.0.0.1", 8767), H).serve_forever()
+```
 
-`st.data_editor` renders cells as a canvas, not HTML — normal selector-based click/type does not work. To edit a cell:
+**Always run BOTH of these:**
+1. **Primary (cascade enabled):** source with `enabled_layers=[blocked_layer, preferred_layer]` → verify success + preferred layer in stats.
+2. **Control (cascade disabled):** same source, `enabled_layers=[blocked_layer]` only → verify failure.
 
-1. **Double-click** the cell at its screen coordinate. A textarea appears in the DOM with the cell's current value selected.
-2. **`ctrl+a`** then **type the new value** (replaces the selection). Do NOT rely on typing alone clearing the cell — it will append to the selected text if the selection was lost.
-3. **Press `Enter`** to commit. Streamlit fires a partial rerun with the edited frame.
+The control is what proves the fixture genuinely blocks. Without it, you can't tell if the primary-run success came from the cascade or from accidentally-permissive fixture behavior. **Also inspect the server log after each run** — it's the smoking gun for "was the blocked layer actually attempted" (primary must show the blocked UA too, not just the preferred one).
 
-Because the cell content is rendered on a canvas, automated DOM inspection can't read the new value back. Verify the edit visually (screenshot) and via downstream side effects — e.g. clicking an `Update Pivot` style button and asserting the pivot counts change.
+Streamlit re-reads `config/sources.json` on every render, so `cp control.json config/sources.json && F5` swaps between runs without restarting the app.
 
-### Pinned-snapshot pattern (used by Iter 6 pivot)
+## Temporary progress_panel patch for engine-only stats
 
-When a UI has an `X` widget whose output is recomputed only on an explicit button click (not on every upstream edit), test by:
+Some iterations add instrumentation (counts, per-layer aggregates, timing stats) to `RunStats` or the `Event` stream that has no permanent UI surface — the Settings form and Results tables don't know about it yet. To visually verify this instrumentation end-to-end, apply a small temporary patch to `ui/components/progress_panel.py` and revert before reporting.
 
-- Take a screenshot of `X` before the edit — note its values.
-- Make the upstream edit.
-- **Before clicking the button**, take another screenshot — `X` should still show the pre-edit values. This proves no auto-refresh.
-- Click the button, take a third screenshot — `X` now reflects the edit.
+The shape of the patch for aggregating a new `PageFetched.<field>` into a caption:
 
-All three screenshots must be captured for the test to be decisive. If you only screenshot the final state, a broken auto-refresh implementation is indistinguishable from a correct pinned-snapshot one.
+1. Add a new field to `ProgressSnapshot`:
+   ```python
+   per_layer_used: dict[int, int] = field(default_factory=dict)
+   ```
+2. In `_apply_events`, on each `PageFetched`:
+   ```python
+   if ev.layer_used is not None:
+       snap.per_layer_used[ev.layer_used] = snap.per_layer_used.get(ev.layer_used, 0) + 1
+   ```
+3. In `_render_panel`, right after the completion banner:
+   ```python
+   if snap.per_layer_used:
+       usage = ", ".join(f"L{n}={snap.per_layer_used[n]}" for n in sorted(snap.per_layer_used))
+       st.caption(f"Layer usage: {usage}")
+   else:
+       st.caption("Layer usage: (none)")
+   ```
 
-## Key assertions to exercise
+Before writing the test report, always revert: `git checkout -- ui/components/progress_panel.py`. The working tree must be clean before posting results.
 
-1. **Default state:** `End` auto-computes to `avg_page_per_month × months_span` (e.g. This Month × avg=3 → End=3)
-2. **Primary run:** banner reads `Run complete. N items in range.` with the exact expected N for your fixture (2 sources × 3 pages × 3 articles = 18 for the 3-article fixture)
-3. **Non-blocking UI (the hard one):** kick off a 10-page run, then click a radio / expand an expander / click a checkbox mid-run. The interaction should respond <1s while progress bars continue advancing. A blocking UI could not produce this frame.
-4. **Cancellation:** click Stop at ~30% progress; within one fragment tick the banner switches to `Run cancelled. Collected N items before stopping.` with `N > 0`.
-5. **Categorization explosion (Iter 5+):** design at least one article to match ≥2 rules in the same grouping; assert the editor caption row count > unique article count.
-6. **Full-category reindex (Iter 6+):** include at least one rule in the grouping that matches zero articles in the fixture; assert it still appears as a `0`-column in the pivot.
-7. **JS pagination (Iter 7+):** for `click_next`, set End far above the fixture's page count and assert it stops when `#next` disables. For `infinite_scroll`, assert the cumulative-dedup shape (8 unique, not 20) against the `infinite_scroll.html` fixture.
+The pattern generalizes to any dict/counter stat on `Event` or `RunStats`. Don't ship this patch — if the user wants a permanent UI surface, that's a separate iteration.
 
-## Gotchas
+## Screen recording
 
-- A 1s/page fixture isn't slow enough to catch mid-run state reliably on a fast machine. Use 2–3s for progress/cancellation tests.
-- Use `end_page=10` (not 3) for the non-blocking test so the run lasts long enough to click through widgets.
-- For categorization/pivot tests, drop the sleep entirely — you want a fast complete run so you can immediately interact with results.
-- The results section stays empty on an empty-results run until something else triggers a full-page rerun — this was fixed in PR #11 via a `st.rerun(scope="app")` in the progress fragment. If testing shows Results empty after completion, check that `ui/components/progress_panel.py` still has the `K_FRAGMENT_SAW_FINISHED` sentinel logic.
-- `data_editor` canvas cells require double-click to edit (single-click just selects); the editing textarea appears at the bottom of the DOM and is NOT inside the canvas element.
-- For JS-pagination fixtures, `file://` URLs work for unit tests but **not** for the Main Dashboard — use a local HTTP server. `SimpleHTTPRequestHandler(directory=...)` is enough; no custom handler needed.
-- The Main Dashboard shares a single `end_page = max(selected sources)` across the engine run, so a `click_next` source with End=10 forces an `infinite_scroll` source with End=4 to also iterate 10 "pages" (dedup handles it). Test items count, not pages denominator, until per-source End arrives in Iter 9.
+```python
+computer(action="record_start")
+# ... drive the UI ...
+computer(action="record_annotate", type="setup", description="...")
+computer(action="record_annotate", type="test_start", test="It should ...")
+# after each assertion:
+computer(action="record_annotate", type="assertion", test="It should ...", test_result="passed", assertion="...")
+computer(action="record_stop", title="...", summary="...")
+```
+
+Always `wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz` before starting the recording — a half-covered browser recording is useless. Use `google-chrome http://localhost:8501` to open a new tab in the already-running Chrome (do NOT try to `kill` / relaunch Chrome).
+
+## Interacting with `st.data_editor`
+
+`st.data_editor` cells are **not** normal `<input>` elements you can click and type into directly. The cell value is committed only after you press `Enter` or click out of the cell. The reliable sequence is:
+
+1. **Double-click** the cell — a single click only selects it, double-click enters edit mode.
+2. `ctrl+a` — select all current text in the cell.
+3. Type the new value — this replaces the selected text.
+4. Press `Enter` — commits the new value to the underlying frame.
+
+For the Category column, which is a `SelectboxColumn`, double-click opens the dropdown, then click the desired option (no typing).
+
+## Per-grouping pivot is a pinned snapshot
+
+The pivot below each grouping's data_editor is NOT live — editing a row's category does not re-pivot the numbers. The user must click **Update Pivot** for the pivot to refresh against the current editor state. Test assertion for the pin: edit a row, verify pivot counts are **unchanged**; click Update Pivot, verify counts **now match** the edited frame. Both halves must hold; an auto-refresh pivot or a dead button would break differently.
+
+The pivot is always reindexed on the full category list (`rules`), so zero-match categories still appear as `0`-columns. This is a regression trap — if a future change uses `pandas.pivot` without explicit reindex, zero-match categories silently disappear. Always test with at least one rule that matches zero articles to pin this down.
+
+## Fragment-driven Results auto-population
+
+After a scrape finishes, the Results tabs (Iter 5+) must populate without a manual click. This is driven by `ui/components/progress_panel.py::_live_fragment` calling `st.rerun(scope="app")` exactly once when it observes the `finished` transition. Assertion: click **Start Scraping**, wait for completion banner, verify Results tabs show rows without touching the page. A regression here looks like `No scrape results yet. Click Start Scraping above...` lingering after the banner appears.
+
+## Devin Secrets Needed
+
+None. Everything in this skill runs against localhost fixtures.
