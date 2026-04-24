@@ -6,17 +6,18 @@ on a background thread (via ``utils.async_bridge.start_engine_thread``)
 so the UI stays responsive; the progress panel polls the bus and
 auto-refreshes via an ``st.fragment``.
 
-Results surfacing (the "D. Results" section) still shows placeholders —
-that's Iterations 5 & 6.
+Iteration 5 adds section D (Results): a Raw Data tab and one tab per
+categorizer grouping, with multi-category row explosion. Editable
+tables + pivots arrive in Iter 6.
 """
 
 from __future__ import annotations
 
 import streamlit as st
 
-from config import load_categorizers, load_sources
+from config import load_app_settings, load_categorizers, load_sources
 from scraper.engine import EngineRunSpec
-from ui.components import progress_panel, source_selector, time_range
+from ui.components import progress_panel, results_tabs, source_selector, time_range
 from ui.components.progress_panel import K_JOB_HANDLE
 from ui.state import ensure_defaults
 from utils.async_bridge import start_engine_thread
@@ -51,8 +52,35 @@ def _start_scrape(
         time_range_end=tr.end,
     )
     progress_panel.reset_snapshot()
+    # Clear previous-run items so the results section doesn't show stale data
+    # once the new run starts emitting events.
+    results_tabs.clear_stashed_items()
     st.session_state[K_JOB_HANDLE] = start_engine_thread(spec)
     return True
+
+
+def _collect_items_if_finished() -> None:
+    """Stash NewsItems from the most recent run once it finishes.
+
+    The progress panel owns its own snapshot; we piggyback on the JobHandle
+    to pull the results exactly once (the handle returns a plain list, not
+    a generator, so repeated reads are fine but wasteful).
+    """
+    handle = st.session_state.get(K_JOB_HANDLE)
+    if handle is None or handle.is_running():
+        return
+    results = handle.results
+    if results is None:
+        return
+    # Already stashed? Avoid recomputing by only stashing if key missing /
+    # empty. Edge case: user starts a new run and _start_scrape clears the
+    # stash, so this block correctly re-populates it from the new handle.
+    if st.session_state.get(results_tabs.K_RUN_ITEMS):
+        return
+    flat: list = []
+    for r in results:
+        flat.extend(r.items)
+    results_tabs.stash_items(flat)
 
 
 def render() -> None:
@@ -61,6 +89,7 @@ def render() -> None:
 
     sources = load_sources()
     groupings = load_categorizers()
+    app_settings = load_app_settings()
 
     if not sources:
         st.info(
@@ -106,9 +135,7 @@ def render() -> None:
 
     progress_panel.render()
 
-    # -- D. Results (placeholder — Iter 5 & 6) --------------------------- #
+    # -- D. Results ------------------------------------------------------- #
+    _collect_items_if_finished()
     st.subheader("D. Results")
-    st.caption(
-        "Editable tables per grouping, pivot tables with full category reindex, "
-        "and the raw-data read-only dataframe — Iterations 5 & 6."
-    )
+    results_tabs.render(groupings, app_settings)
