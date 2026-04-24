@@ -8,6 +8,7 @@ from config import ScraperSelectors, ScrapeSource
 from scraper.pagination import (
     PaginationNotSupportedError,
     iter_page_requests,
+    needs_browser,
     url_for_page,
 )
 
@@ -60,3 +61,9 @@ def test_iter_page_requests_rejects_non_url_strategies():
         list(iter_page_requests(src_infinite, 1, 2))
     with pytest.raises(PaginationNotSupportedError):
         list(iter_page_requests(src_click, 1, 2))
+
+
+def test_needs_browser_flags_js_strategies():
+    assert needs_browser(_make_source(pagination_type="url_params")) is False
+    assert needs_browser(_make_source(pagination_type="infinite_scroll")) is True
+    assert needs_browser(_make_source(pagination_type="click_next")) is True

@@ -18,13 +18,14 @@ from dataclasses import dataclass
 from datetime import date
 
 from config import ScrapeSource
+from scraper.pagination import needs_browser
 from scraper.progress import (
     ProgressBus,
     RunFinished,
     RunStarted,
     SourceFinished,
 )
-from scraper.runner import SourceRunResult, run_layer1_source
+from scraper.runner import SourceRunResult, run_browser_source, run_layer1_source
 
 logger = logging.getLogger(__name__)
 
@@ -88,14 +89,24 @@ def run(
 
     def _run_one(src: ScrapeSource) -> SourceRunResult:
         try:
-            result = run_layer1_source(
-                src,
-                start_page=spec.start_page,
-                end_page=spec.end_page,
-                time_range_start=spec.time_range_start,
-                time_range_end=spec.time_range_end,
-                bus=bus,
-            )
+            if needs_browser(src):
+                result = run_browser_source(
+                    src,
+                    start_page=spec.start_page,
+                    end_page=spec.end_page,
+                    time_range_start=spec.time_range_start,
+                    time_range_end=spec.time_range_end,
+                    bus=bus,
+                )
+            else:
+                result = run_layer1_source(
+                    src,
+                    start_page=spec.start_page,
+                    end_page=spec.end_page,
+                    time_range_start=spec.time_range_start,
+                    time_range_end=spec.time_range_end,
+                    bus=bus,
+                )
         except Exception:  # pragma: no cover - exercised in integration tests
             logger.exception("source %s crashed", src.name)
             # Return an empty result so the whole run still finishes cleanly.

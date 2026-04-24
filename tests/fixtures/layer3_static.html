@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="id">
+<head><meta charset="utf-8"><title>Static layer-3 fixture</title></head>
+<body>
+<div id="placeholder">Loading…</div>
+<script>
+// Simulate a React-style SPA: the real content is injected by JS after load.
+// Layer 1 (httpx) would see "Loading…"; Layer 3 (Playwright) sees the real DOM.
+window.addEventListener("DOMContentLoaded", () => {
+  const main = document.createElement("main");
+  const items = [
+    {title: "Harga BBM dan pertanian naik", date: "22 Apr 2026", href: "https://example.test/a1"},
+    {title: "Produksi pertanian stabil", date: "21 Apr 2026", href: "https://example.test/a2"},
+    {title: "Konsumsi rumah tangga naik", date: "20 Apr 2026", href: "https://example.test/a3"},
+  ];
+  for (const it of items) {
+    const art = document.createElement("article");
+    art.className = "news-card";
+    const h3 = document.createElement("h3");
+    const a = document.createElement("a");
+    a.href = it.href;
+    a.textContent = it.title;
+    h3.appendChild(a);
+    const time = document.createElement("time");
+    time.textContent = it.date;
+    art.appendChild(h3);
+    art.appendChild(time);
+    main.appendChild(art);
+  }
+  document.body.replaceChild(main, document.getElementById("placeholder"));
+});
+</script>
+</body>
+</html>
