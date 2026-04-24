@@ -79,6 +79,49 @@ cd /home/ubuntu/repos/news-scraper
 
 Streamlit serves the Dashboard at `http://localhost:8501/` (NOT `/dashboard` — that 404s because st.navigation's default page is mounted at `/`).
 
+## JS pagination (Iter 7+) — click_next and infinite_scroll
+
+For `click_next` / `infinite_scroll` sources, the engine routes to a persistent headless Chromium page (see `scraper/runner.run_browser_source`). The `url_params` recipe above does **not** apply — those sources need a real HTTP server (no `file://`) serving HTML that the browser can evaluate JS from.
+
+The simplest recipe is to serve the existing deterministic fixtures verbatim:
+
+```python
+# /home/ubuntu/test-plans/fixture_server_js.py
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+import os
+FIXTURES = "/home/ubuntu/repos/news-scraper/tests/fixtures"
+class H(SimpleHTTPRequestHandler):
+    def __init__(self, *a, **kw): super().__init__(*a, directory=FIXTURES, **kw)
+    def log_message(self, *a, **k): pass
+os.chdir(FIXTURES)
+ThreadingHTTPServer(("127.0.0.1", 8766), H).serve_forever()
+```
+
+Then seed `config/sources.json` with `enabled_layers=[3]` and `pagination_type` set appropriately:
+
+```json
+{
+  "name": "ClickNextSite",
+  "pagination_type": "click_next",
+  "url_template": "http://127.0.0.1:8766/click_next.html",
+  "selectors": {"container": "article.news-card", "title": "h3 a", "link": "h3 a", "date": "time", "next_button": "#next"},
+  "enabled_layers": [3], "scrolls_per_page": 1,
+  "sleep": {"min": 0.0, "max": 0.0}, "max_retries": 0, "avg_page_per_month": 3, "enabled": true
+}
+```
+
+`infinite_scroll` sources use `pagination_type="infinite_scroll"`, `next_button=null`, and a `scrolls_per_page` ≥ 1 (one scroll per yielded snapshot).
+
+### Expected shape on Main Dashboard completion
+
+- `click_next` fixture has 3 pages with `#next` disabled on page 3 — setting End=10 proves early-stop: the row reads `ClickNextSite — 3/<envelope> pages · 6 items in range`.
+- `infinite_scroll` fixture has initial 2 articles + 3 JS batches of 2 = 8 unique items. With dedup-by-link across cumulative snapshots, End=4 yields 8 items (not 2+4+6+8=20).
+- Time range: a Custom range like `15 Apr 2026 → 22 Apr 2026` covers all fixture dates, or just use `This Month` when the current date is April 2026.
+
+### Gotcha — per-source End vs shared envelope
+
+`ui/pages/main_dashboard.py` takes `end_page = max(s.end_page for s in picked)` across all selected sources and passes that single value into `EngineRunSpec`. So if you select `ClickNextSite` (End=10) and `InfiniteScrollSite` (End=4), **both** per-source rows display `/10` in the pages denominator, and the infinite_scroll runner iterates 10 "pages" (yielding duplicate snapshots which dedup to 8 unique items). Plan your assertions around the **items count**, not the pages denominator. Per-source End bounds are flagged in code as Iter 9 work.
+
 ## Reference: exact widget keys & texts
 
 - Time range radio: key `tr_main_preset`, options `This Month | Last Month | Year to Date | This Year | Custom`
@@ -123,6 +166,7 @@ All three screenshots must be captured for the test to be decisive. If you only 
 4. **Cancellation:** click Stop at ~30% progress; within one fragment tick the banner switches to `Run cancelled. Collected N items before stopping.` with `N > 0`.
 5. **Categorization explosion (Iter 5+):** design at least one article to match ≥2 rules in the same grouping; assert the editor caption row count > unique article count.
 6. **Full-category reindex (Iter 6+):** include at least one rule in the grouping that matches zero articles in the fixture; assert it still appears as a `0`-column in the pivot.
+7. **JS pagination (Iter 7+):** for `click_next`, set End far above the fixture's page count and assert it stops when `#next` disables. For `infinite_scroll`, assert the cumulative-dedup shape (8 unique, not 20) against the `infinite_scroll.html` fixture.
 
 ## Gotchas
 
@@ -131,3 +175,5 @@ All three screenshots must be captured for the test to be decisive. If you only 
 - For categorization/pivot tests, drop the sleep entirely — you want a fast complete run so you can immediately interact with results.
 - The results section stays empty on an empty-results run until something else triggers a full-page rerun — this was fixed in PR #11 via a `st.rerun(scope="app")` in the progress fragment. If testing shows Results empty after completion, check that `ui/components/progress_panel.py` still has the `K_FRAGMENT_SAW_FINISHED` sentinel logic.
 - `data_editor` canvas cells require double-click to edit (single-click just selects); the editing textarea appears at the bottom of the DOM and is NOT inside the canvas element.
+- For JS-pagination fixtures, `file://` URLs work for unit tests but **not** for the Main Dashboard — use a local HTTP server. `SimpleHTTPRequestHandler(directory=...)` is enough; no custom handler needed.
+- The Main Dashboard shares a single `end_page = max(selected sources)` across the engine run, so a `click_next` source with End=10 forces an `infinite_scroll` source with End=4 to also iterate 10 "pages" (dedup handles it). Test items count, not pages denominator, until per-source End arrives in Iter 9.
