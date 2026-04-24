@@ -31,7 +31,7 @@ import random
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from config import ScrapeSource
 from scraper.date_parser import parse_scraped_date
@@ -40,6 +40,9 @@ from scraper.layers.layer1_httpx import Layer1Httpx
 from scraper.models import NewsItem, RawScrapeHit
 from scraper.pagination import iter_page_requests
 from scraper.parsers import extract_items
+
+if TYPE_CHECKING:
+    from scraper.progress import ProgressBus
 
 logger = logging.getLogger(__name__)
 
@@ -148,11 +151,14 @@ def run_layer1_source(
     sleeper: Sleeper | None = None,
     rng: random.Random | None = None,
     reference_date: date | None = None,
+    bus: ProgressBus | None = None,
 ) -> SourceRunResult:
     """Scrape one source end-to-end via Layer 1.
 
     Parameters beyond the source/config are injectable so the runner is fully
-    unit-testable without touching the network or the wall clock.
+    unit-testable without touching the network or the wall clock. If ``bus``
+    is provided, lifecycle events are emitted and the runner checks
+    ``bus.is_cancelled()`` before fetching each page.
     """
     if start_page < 1 or end_page < start_page:
         raise ValueError(f"invalid page range: start_page={start_page} end_page={end_page}")
@@ -165,7 +171,17 @@ def run_layer1_source(
     stats = RunStats(source_name=source.name)
     items: list[NewsItem] = []
 
+    total_pages = end_page - start_page + 1
+    if bus is not None:
+        from scraper.progress import SourceStarted
+
+        bus.emit(SourceStarted(source_name=source.name, total_pages=total_pages))
+
     for req in iter_page_requests(source, start_page=start_page, end_page=end_page):
+        if bus is not None and bus.is_cancelled():
+            logger.info("source %s: cancelled before page %d", source.name, req.page)
+            break
+
         fetched = _fetch_with_retries(
             fetcher=fetcher,
             url=req.url,
@@ -176,11 +192,22 @@ def run_layer1_source(
         if fetched is None:
             stats.pages_failed += 1
             stats.errors.append(f"page {req.page}: all retries failed")
+            if bus is not None:
+                from scraper.progress import PageFailed
+
+                bus.emit(
+                    PageFailed(
+                        source_name=source.name,
+                        page=req.page,
+                        error=f"all {source.max_retries + 1} attempts failed",
+                    )
+                )
             continue
 
         hits = extract_items(fetched.html, source.selectors)
         stats.items_scanned += len(hits)
 
+        page_in_range = 0
         oldest_seen_below_range = False
         for hit in hits:
             item = _hit_to_news_item(hit, source.name, req.page, ref)
@@ -192,8 +219,21 @@ def run_layer1_source(
             if _inrange(item.date_parsed, time_range_start, time_range_end):
                 items.append(item)
                 stats.items_in_range += 1
+                page_in_range += 1
             else:
                 stats.items_out_of_range += 1
+
+        if bus is not None:
+            from scraper.progress import PageFetched
+
+            bus.emit(
+                PageFetched(
+                    source_name=source.name,
+                    page=req.page,
+                    items_scanned=len(hits),
+                    items_in_range=page_in_range,
+                )
+            )
 
         if oldest_seen_below_range:
             stats.early_stopped = True

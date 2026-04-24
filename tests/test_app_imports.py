@@ -30,6 +30,15 @@ def test_can_import_each_settings_component():
         importlib.import_module(mod)
 
 
+def test_can_import_each_dashboard_component():
+    for mod in (
+        "ui.components.time_range",
+        "ui.components.source_selector",
+        "ui.components.progress_panel",
+    ):
+        importlib.import_module(mod)
+
+
 def test_scrape_layer_is_exported_from_config():
     """Regression test: ScrapeLayer was missing from config/__init__.py and
     broke the Settings → Scrapers tab at runtime."""
