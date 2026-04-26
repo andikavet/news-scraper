@@ -21,6 +21,7 @@ from ui.components import (
     export_panel,
     progress_panel,
     results_tabs,
+    run_history_panel,
     source_selector,
     time_range,
 )
@@ -158,3 +159,7 @@ def render() -> None:
     # the user has actively edited (the tabs render first and write the
     # edited frames to session state).
     export_panel.render(results_tabs.get_stashed_items(), groupings, app_settings)
+
+    # -- E. Run history (Iter 11) ---------------------------------------- #
+    st.subheader("E. Run history")
+    run_history_panel.render()
