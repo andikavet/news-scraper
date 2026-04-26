@@ -49,3 +49,22 @@ def pytest_configure(config):
     config.addinivalue_line(
         "markers", "playwright: marks tests that require a real Playwright chromium install"
     )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Redirect the config layer at a per-test tmp dir.
+
+    Iter 11 added :mod:`scraper.run_history` which the engine writes to on
+    every completed run. Without isolation, every engine-touching test in
+    the suite would silently scribble into the developer's real
+    ``config/run_history.json``. Routing the config dir through a tmp path
+    keeps tests hermetic.
+
+    Tests that care about config files (e.g. ``test_config_store``) set
+    their own ``NEWS_SCRAPER_CONFIG_DIR`` via monkeypatch; this fixture's
+    setting is shadowed by the inner monkeypatch and restored when that
+    test ends.
+    """
+    monkeypatch.setenv("NEWS_SCRAPER_CONFIG_DIR", str(tmp_path))
+    yield tmp_path

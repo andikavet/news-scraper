@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import UTC, date, datetime
 
 from config import ScrapeSource
 from scraper.pagination import needs_browser
@@ -25,6 +25,7 @@ from scraper.progress import (
     RunStarted,
     SourceFinished,
 )
+from scraper.run_history import append_entry, build_entry_from_results
 from scraper.runner import SourceRunResult, run_browser_source, run_url_params_source
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,11 @@ def run(
     # emit into so the run lifecycle is consistent.
     bus = bus if bus is not None else ProgressBus()
 
+    # Iter 11: capture wall-clock start so the persisted history entry can
+    # report duration. ``datetime.now(timezone.utc)`` is timezone-aware so
+    # Pydantic round-trips through JSON without dropping the offset.
+    started_at = datetime.now(UTC)
+
     total_pages_planned = sum(
         max(0, end - start + 1) for start, end in (spec.bounds_for(s.name) for s in sources)
     )
@@ -150,7 +156,21 @@ def run(
 
     ordered = [results_by_name[s.name] for s in sources if s.name in results_by_name]
     total_items = sum(len(r.items) for r in ordered)
-    bus.emit(RunFinished(total_items=total_items, cancelled=bus.is_cancelled()))
+    cancelled = bus.is_cancelled()
+    bus.emit(RunFinished(total_items=total_items, cancelled=cancelled))
+
+    # Iter 11: persist a one-line summary of this run so the dashboard's
+    # E. Run history panel can show "this morning's run hit 3 blocks" etc.
+    # ``append_entry`` is best-effort and swallows I/O errors so a disk
+    # problem can't fail an otherwise-successful scrape.
+    entry = build_entry_from_results(
+        started_at=started_at,
+        finished_at=datetime.now(UTC),
+        source_names=[s.name for s in sources],
+        results=ordered,
+        cancelled=cancelled,
+    )
+    append_entry(entry)
     return ordered
 
 
