@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 
 from config import ScrapeSource
@@ -32,13 +32,28 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class EngineRunSpec:
-    """Inputs a caller assembles once and hands to ``run``."""
+    """Inputs a caller assembles once and hands to ``run``.
+
+    ``start_page``/``end_page`` are the default bounds applied to every
+    source. ``per_source_pages`` (Iter 10) lets the UI send a distinct
+    ``(start_page, end_page)`` tuple per source — used when the user has
+    auto-calculated ``end_page = avg_page_per_month * months_span`` which
+    legitimately differs between sources. Any source not present in the
+    mapping falls back to the default bounds.
+    """
 
     sources: list[ScrapeSource]
     start_page: int
     end_page: int
     time_range_start: date
     time_range_end: date | None = None
+    per_source_pages: dict[str, tuple[int, int]] = field(default_factory=dict)
+
+    def bounds_for(self, source_name: str) -> tuple[int, int]:
+        """Return the (start_page, end_page) this source should run with."""
+        if source_name in self.per_source_pages:
+            return self.per_source_pages[source_name]
+        return (self.start_page, self.end_page)
 
 
 def _enabled(sources: list[ScrapeSource]) -> list[ScrapeSource]:
@@ -73,7 +88,9 @@ def run(
     # emit into so the run lifecycle is consistent.
     bus = bus if bus is not None else ProgressBus()
 
-    total_pages_planned = len(sources) * max(0, spec.end_page - spec.start_page + 1)
+    total_pages_planned = sum(
+        max(0, end - start + 1) for start, end in (spec.bounds_for(s.name) for s in sources)
+    )
     bus.emit(
         RunStarted(
             source_names=[s.name for s in sources],
@@ -88,12 +105,13 @@ def run(
         return []
 
     def _run_one(src: ScrapeSource) -> SourceRunResult:
+        start_page, end_page = spec.bounds_for(src.name)
         try:
             if needs_browser(src):
                 result = run_browser_source(
                     src,
-                    start_page=spec.start_page,
-                    end_page=spec.end_page,
+                    start_page=start_page,
+                    end_page=end_page,
                     time_range_start=spec.time_range_start,
                     time_range_end=spec.time_range_end,
                     bus=bus,
@@ -101,8 +119,8 @@ def run(
             else:
                 result = run_url_params_source(
                     src,
-                    start_page=spec.start_page,
-                    end_page=spec.end_page,
+                    start_page=start_page,
+                    end_page=end_page,
                     time_range_start=spec.time_range_start,
                     time_range_end=spec.time_range_end,
                     bus=bus,

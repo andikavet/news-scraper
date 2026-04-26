@@ -17,7 +17,13 @@ import streamlit as st
 
 from config import load_app_settings, load_categorizers, load_sources
 from scraper.engine import EngineRunSpec
-from ui.components import progress_panel, results_tabs, source_selector, time_range
+from ui.components import (
+    export_panel,
+    progress_panel,
+    results_tabs,
+    source_selector,
+    time_range,
+)
 from ui.components.progress_panel import K_JOB_HANDLE
 from ui.state import ensure_defaults
 from utils.async_bridge import start_engine_thread
@@ -34,22 +40,29 @@ def _start_scrape(
         st.warning("Time range is inverted — fix the start/end before running.", icon="⚠️")
         return False
 
-    # All selections share the same [start_page, end_page] envelope on the
-    # engine, but per-source overrides would diverge — so we take the min
-    # start_page and max end_page across selected sources. This is a
-    # reasonable first-cut; Iter 9 lets each source have its own bounds.
-    start_page = min(s.start_page for s in picked)
-    end_page = max(s.end_page for s in picked)
-    if end_page < start_page:
-        st.error("End page is before start page — nothing to do.")
+    # Each source carries its own (start_page, end_page) envelope through
+    # ``EngineRunSpec.per_source_pages`` so a source with auto-calculated
+    # ``end_page=3`` no longer shares a ``/10`` denominator with a source
+    # that was auto-set to ``end_page=10``. The top-level bounds remain
+    # as defaults (used by code paths that don't go through
+    # ``bounds_for``) — computed from the widest envelope so they are
+    # always at least as permissive as the per-source overrides.
+    per_source: dict[str, tuple[int, int]] = {
+        s.source.name: (s.start_page, s.end_page) for s in picked
+    }
+    default_start = min(s.start_page for s in picked)
+    default_end = max(s.end_page for s in picked)
+    if any(end < start for (start, end) in per_source.values()):
+        st.error("End page is before start page for at least one source — nothing to do.")
         return False
 
     spec = EngineRunSpec(
         sources=[s.source for s in picked],
-        start_page=start_page,
-        end_page=end_page,
+        start_page=default_start,
+        end_page=default_end,
         time_range_start=tr.start,
         time_range_end=tr.end,
+        per_source_pages=per_source,
     )
     progress_panel.reset_snapshot()
     # Clear previous-run items so the results section doesn't show stale data
@@ -141,3 +154,7 @@ def render() -> None:
     _collect_items_if_finished()
     st.subheader("D. Results")
     results_tabs.render(groupings, app_settings)
+    # Export buttons sit below the tabs so they pick up whichever frame
+    # the user has actively edited (the tabs render first and write the
+    # edited frames to session state).
+    export_panel.render(results_tabs.get_stashed_items(), groupings, app_settings)
