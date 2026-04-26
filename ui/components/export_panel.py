@@ -134,19 +134,26 @@ def render(
 ) -> None:
     """Streamlit entrypoint — surfaces download buttons.
 
-    Building the workbook on every render would re-run categorization
-    needlessly; we defer construction until the user actually clicks by
-    using ``st.download_button``'s ``data`` callable.
+    Both downloads are built eagerly on every dashboard render. ``data=``
+    callables would let us defer construction until click, but Streamlit
+    rotates the deferred-file token on each rerun and rejects the click
+    with "Deferred file not found" when the user clicks one button
+    immediately after another. Pre-computing the bytes side-steps that
+    by handing Streamlit a stable buffer it can serve directly. Both
+    payloads are small (a workbook with a 4-item run is <10 KB), so the
+    eager build cost is dominated by the surrounding dashboard render.
     """
     if not items:
         return
 
     cols = st.columns([1, 1, 4])
     suffix = _timestamp_suffix()
+    xlsx_payload = build_workbook_bytes(items, groupings, app_settings)
+    csv_payload = raw_csv_bytes(items)
     with cols[0]:
         st.download_button(
             "Download .xlsx",
-            data=lambda: build_workbook_bytes(items, groupings, app_settings),
+            data=xlsx_payload,
             file_name=f"news-scrape-{suffix}.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             key="export_xlsx",
@@ -155,7 +162,7 @@ def render(
     with cols[1]:
         st.download_button(
             "Download Raw .csv",
-            data=lambda: raw_csv_bytes(items),
+            data=csv_payload,
             file_name=f"news-scrape-raw-{suffix}.csv",
             mime="text/csv",
             key="export_raw_csv",
