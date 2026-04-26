@@ -46,6 +46,12 @@ class ProgressSnapshot:
     per_source_pages_total: dict[str, int] = field(default_factory=dict)
     per_source_items: dict[str, int] = field(default_factory=dict)
     errors: list[str] = field(default_factory=list)
+    # Iter 10: which layer served each successful page, aggregated across
+    # all sources. Populated from ``SourceFinished.result.stats.layer_usage``
+    # when each source finishes. Surfaces the Iter 8 / Iter 9 cascade
+    # transparently on the completion banner without hijacking the runtime
+    # event stream (which would require a new event type).
+    layer_usage: dict[int, int] = field(default_factory=dict)
 
 
 def _apply_events(snap: ProgressSnapshot, events: list[Event]) -> None:
@@ -73,6 +79,9 @@ def _apply_events(snap: ProgressSnapshot, events: list[Event]) -> None:
             snap.errors.append(f"{ev.source_name} page {ev.page}: {ev.error}")
         elif isinstance(ev, SourceFinished):
             snap.sources_done += 1
+            # Aggregate this source's per-layer page counts into the run total.
+            for layer_num, count in ev.result.stats.layer_usage.items():
+                snap.layer_usage[layer_num] = snap.layer_usage.get(layer_num, 0) + count
         elif isinstance(ev, RunFinished):
             snap.finished = True
             snap.cancelled = ev.cancelled
@@ -145,6 +154,11 @@ def _render_panel(snap: ProgressSnapshot, handle: JobHandle | None) -> None:
             st.info(f"Run cancelled. Collected {snap.total_items} items before stopping.", icon="⏹️")
         else:
             st.success(f"Run complete. {snap.total_items} items in range.", icon="✅")
+        # Iter 10: show which fallback layer served how many pages so the
+        # user can see the Iter 8 / Iter 9 cascade in action.
+        if snap.layer_usage:
+            parts = [f"L{n}={snap.layer_usage[n]}" for n in sorted(snap.layer_usage)]
+            st.caption(f"Layer usage: {', '.join(parts)}")
         if handle is not None and handle.error is not None:
             st.error(f"Worker thread crashed: {handle.error!r}")
 
