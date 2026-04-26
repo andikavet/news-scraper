@@ -72,7 +72,7 @@ Overwrite with one or more sources pointing at the fixture server. Use `sleep={m
 Schema gotchas that will cause a `pydantic ValidationError` on dashboard load (and make the whole page red):
 - `selectors.container` (not `item_container`).
 - `sleep.min` / `sleep.max` (not `min_seconds` / `max_seconds`).
-- `enabled_layers` must be a non-empty list; `[4]` alone degrades silently to `[1]` via `build_layers_for_source` (Layer 4 not implemented).
+- `enabled_layers` must be a non-empty list. Pre-Iter 9, `[4]` alone degraded silently to `[1]`; post-Iter 9 Layer 4 is wired and runs as configured.
 
 Streamlit re-reads `config/sources.json` on every render, so you can swap the file between test runs and just press F5 — no need to restart Streamlit.
 
@@ -117,7 +117,20 @@ Then seed `config/sources.json` with `enabled_layers=[3]` and `pagination_type` 
 }
 ```
 
-End Page comes from `max(end_page)` across all selected sources (see `ui/pages/main_dashboard.py`) — so per-source rows share a single `/N` denominator. When writing test assertions, pin the **items count**, not the `/N` — the latter is source-selection-dependent.
+## Per-source page bounds (Iter 10) — distinct denominators
+
+As of Iter 10, each source carries its own `(start_page, end_page)` envelope through `EngineRunSpec.per_source_pages`. The previous `max(end_page)` shared-denominator behavior is gone — two sources with different auto-calculated `end_page` values now show distinct progress-bar denominators (e.g. `PortalA — 1/1 pages` and `PortalB — 3/3 pages`).
+
+This enables a clean adversarial pin for verifying the per-source bounds flow:
+
+1. Seed two Layer-1-only sources with **different `avg_page_per_month`** values (e.g. 1 and 3).
+2. Use the "This Month" range so auto-calc kicks in (`end_page = avg_page_per_month * months_span`, capped at the user's input).
+3. Assert per-source progress shows distinct denominators — `1/1` vs `3/3`. A regression to the pre-Iter-10 shared denominator would force both to `/3`.
+
+The `1/1` vs `3/3` asymmetry is the cleanest pin because:
+- A broken bounds plumbing reverts both to the max envelope (`/3 + /3`).
+- A broken per-source RunStarted total would change `total_pages_planned` (now `1+3=4`, was `2*3=6` pre-Iter-10).
+- Both failures produce visibly different completion captions, distinguishing failure modes at a glance.
 
 ## Discriminating-UA fixture server (proving fallback cascades)
 
@@ -158,9 +171,37 @@ The control is what proves the fixture genuinely blocks. Without it, you can't t
 
 Streamlit re-reads `config/sources.json` on every render, so `cp control.json config/sources.json && F5` swaps between runs without restarting the app.
 
+## Streamlit `st.download_button` deferred-file gotcha
+
+**Symptom:** clicking a second download button immediately after a first surfaces `Deferred file <hex-id> not found` and the click is dropped.
+
+**Root cause:** when `data=` is a callable (lambda/closure), Streamlit registers the button in *deferred-file mode* — the button's `?token=<id>` URL is only valid until the next rerun. Each Streamlit rerun rotates the deferred-file table (every interaction triggers a rerun), so the FIRST button's click rotates the SECOND button's token before the user can click it. The second click hits the now-invalid token and fails.
+
+**Fix:** pre-compute the byte payloads on every render and pass them directly to `data=`:
+
+```python
+# BAD — both buffers are deferred, second click loses the race after first click reruns
+st.download_button("xlsx", data=lambda: build_workbook_bytes(items), file_name="...")
+st.download_button("csv", data=lambda: raw_csv_bytes(items), file_name="...")
+
+# GOOD — eager compute, both buffers are stable across reruns
+xlsx_payload = build_workbook_bytes(items)
+csv_payload = raw_csv_bytes(items)
+st.download_button("xlsx", data=xlsx_payload, file_name="...")
+st.download_button("csv", data=csv_payload, file_name="...")
+```
+
+**Diagnostic signal:** the error message includes a hex deferred-file id (e.g. `Deferred file c1c67d64e02a488f9ccf878cc8a1f74a not found`). If you see this, search for `data=lambda` in the offending button's render path.
+
+**Test pattern:** after a scrape run completes, click the first download button → wait for the file to arrive in the download tray → immediately click the second button (no manual refresh, no other interaction). Both files must end up on disk with distinct timestamps. Inspect them with `ls -la /home/ubuntu/Downloads/` to confirm.
+
+The eager-compute cost is negligible for typical run sizes (a 4-item workbook is <10 KB); only worry about it if a single payload is megabytes.
+
 ## Temporary progress_panel patch for engine-only stats
 
 Some iterations add instrumentation (counts, per-layer aggregates, timing stats) to `RunStats` or the `Event` stream that has no permanent UI surface — the Settings form and Results tables don't know about it yet. To visually verify this instrumentation end-to-end, apply a small temporary patch to `ui/components/progress_panel.py` and revert before reporting.
+
+(Iter 10 made `Layer usage: L1=N, L2=M` a permanent surface on the completion banner via `ProgressSnapshot.layer_usage`, so this patch is no longer needed for layer-usage specifically. Pattern still applies for any new per-event aggregate.)
 
 The shape of the patch for aggregating a new `PageFetched.<field>` into a caption:
 
@@ -197,30 +238,3 @@ computer(action="record_annotate", type="test_start", test="It should ...")
 computer(action="record_annotate", type="assertion", test="It should ...", test_result="passed", assertion="...")
 computer(action="record_stop", title="...", summary="...")
 ```
-
-Always `wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz` before starting the recording — a half-covered browser recording is useless. Use `google-chrome http://localhost:8501` to open a new tab in the already-running Chrome (do NOT try to `kill` / relaunch Chrome).
-
-## Interacting with `st.data_editor`
-
-`st.data_editor` cells are **not** normal `<input>` elements you can click and type into directly. The cell value is committed only after you press `Enter` or click out of the cell. The reliable sequence is:
-
-1. **Double-click** the cell — a single click only selects it, double-click enters edit mode.
-2. `ctrl+a` — select all current text in the cell.
-3. Type the new value — this replaces the selected text.
-4. Press `Enter` — commits the new value to the underlying frame.
-
-For the Category column, which is a `SelectboxColumn`, double-click opens the dropdown, then click the desired option (no typing).
-
-## Per-grouping pivot is a pinned snapshot
-
-The pivot below each grouping's data_editor is NOT live — editing a row's category does not re-pivot the numbers. The user must click **Update Pivot** for the pivot to refresh against the current editor state. Test assertion for the pin: edit a row, verify pivot counts are **unchanged**; click Update Pivot, verify counts **now match** the edited frame. Both halves must hold; an auto-refresh pivot or a dead button would break differently.
-
-The pivot is always reindexed on the full category list (`rules`), so zero-match categories still appear as `0`-columns. This is a regression trap — if a future change uses `pandas.pivot` without explicit reindex, zero-match categories silently disappear. Always test with at least one rule that matches zero articles to pin this down.
-
-## Fragment-driven Results auto-population
-
-After a scrape finishes, the Results tabs (Iter 5+) must populate without a manual click. This is driven by `ui/components/progress_panel.py::_live_fragment` calling `st.rerun(scope="app")` exactly once when it observes the `finished` transition. Assertion: click **Start Scraping**, wait for completion banner, verify Results tabs show rows without touching the page. A regression here looks like `No scrape results yet. Click Start Scraping above...` lingering after the banner appears.
-
-## Devin Secrets Needed
-
-None. Everything in this skill runs against localhost fixtures.
