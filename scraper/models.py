@@ -35,12 +35,32 @@ class RawScrapeHit:
 
 
 @dataclass
+class SelectorCheck:
+    """Per-selector outcome of a Test Selector run.
+
+    ``matched`` is False when the selector returned no value (or, for
+    ``container``, no nodes); ``samples`` shows up to a few extracted
+    values so the user can see what the selector actually pulled.
+    """
+
+    name: str  # "container" / "title" / "link" / "date"
+    selector: str
+    matched: bool
+    samples: list[str] = field(default_factory=list)
+    error: str | None = None
+
+
+@dataclass
 class TestSelectorResult:
     """Output of the Settings-page 'Test Selector' tool.
 
     ``items`` is populated when the fetch succeeded, regardless of whether the
     selectors matched anything — zero-length results are a valid failure mode
     that the UI surfaces differently from network errors.
+
+    Iter 12 adds per-selector ``checks`` so the UI can differentiate between
+    container/title/link/date pass/fail rather than just showing one combined
+    "0 items matched" warning.
     """
 
     ok: bool
@@ -49,6 +69,7 @@ class TestSelectorResult:
     layer: str
     items: list[RawScrapeHit] = field(default_factory=list)
     error: str | None = None
+    checks: list[SelectorCheck] = field(default_factory=list)
 
 
-__all__ = ["NewsItem", "RawScrapeHit", "TestSelectorResult"]
+__all__ = ["NewsItem", "RawScrapeHit", "SelectorCheck", "TestSelectorResult"]

@@ -33,6 +33,25 @@ K_FRAGMENT_SAW_FINISHED = "progress_fragment_saw_finished"
 
 
 @dataclass
+class SourceSummary:
+    """Per-source roll-up surfaced in the post-scrape detail panel.
+
+    Populated when a ``SourceFinished`` event arrives so the UI can show
+    early-stopping reasons, page failures, and selector-miss signals
+    without having to re-iterate the events.
+    """
+
+    source_name: str
+    pages_scanned: int
+    pages_failed: int
+    items_in_range: int
+    early_stopped: bool
+    early_stop_reason: str | None
+    page_failures: list[dict[str, str]] = field(default_factory=list)
+    pages_with_zero_hits: int = 0
+
+
+@dataclass
 class ProgressSnapshot:
     """Accumulated view of a run — mutated as bus events arrive."""
 
@@ -52,6 +71,8 @@ class ProgressSnapshot:
     # transparently on the completion banner without hijacking the runtime
     # event stream (which would require a new event type).
     layer_usage: dict[int, int] = field(default_factory=dict)
+    # Iter 12: per-source summaries used for the post-scrape detail panel.
+    source_summaries: list[SourceSummary] = field(default_factory=list)
 
 
 def _apply_events(snap: ProgressSnapshot, events: list[Event]) -> None:
@@ -82,6 +103,19 @@ def _apply_events(snap: ProgressSnapshot, events: list[Event]) -> None:
             # Aggregate this source's per-layer page counts into the run total.
             for layer_num, count in ev.result.stats.layer_usage.items():
                 snap.layer_usage[layer_num] = snap.layer_usage.get(layer_num, 0) + count
+            stats = ev.result.stats
+            snap.source_summaries.append(
+                SourceSummary(
+                    source_name=stats.source_name,
+                    pages_scanned=stats.pages_scanned,
+                    pages_failed=stats.pages_failed,
+                    items_in_range=stats.items_in_range,
+                    early_stopped=stats.early_stopped,
+                    early_stop_reason=stats.early_stop_reason,
+                    page_failures=list(stats.page_failures),
+                    pages_with_zero_hits=stats.pages_with_zero_hits,
+                )
+            )
         elif isinstance(ev, RunFinished):
             snap.finished = True
             snap.cancelled = ev.cancelled
@@ -159,8 +193,95 @@ def _render_panel(snap: ProgressSnapshot, handle: JobHandle | None) -> None:
         if snap.layer_usage:
             parts = [f"L{n}={snap.layer_usage[n]}" for n in sorted(snap.layer_usage)]
             st.caption(f"Layer usage: {', '.join(parts)}")
+        # Iter 12: detailed post-scrape summary — one expander per source
+        # surfacing early-stopping reasons, per-page failures, and
+        # selector-miss signals so the user can diagnose without grepping
+        # the engine logs.
+        _render_post_scrape_summary(snap)
         if handle is not None and handle.error is not None:
             st.error(f"Worker thread crashed: {handle.error!r}")
+
+
+def _render_post_scrape_summary(snap: ProgressSnapshot) -> None:
+    """Render a per-source detail panel after a run completes.
+
+    Each source gets one ``st.expander`` that summarises the three things
+    the user most often wants to know after a run:
+
+    1. Did this source early-stop, and why? (date-window-exceeded marker)
+    2. Did any specific pages fail, and what was the error?
+    3. Were the selectors silently broken? (zero-hit pages signal a likely
+       container-selector mismatch — distinct from a network failure.)
+
+    The panel only renders when at least one source produced a noteworthy
+    signal; an entirely-clean run keeps the UI uncluttered.
+    """
+    if not snap.source_summaries:
+        return
+
+    notable = [
+        s
+        for s in snap.source_summaries
+        if s.early_stopped or s.page_failures or s.pages_with_zero_hits
+    ]
+    if not notable and not any(s.pages_scanned > 0 for s in snap.source_summaries):
+        return
+
+    label = (
+        "Run summary — every source clean"
+        if not notable
+        else f"Run summary — {len(notable)} source(s) with notable events"
+    )
+    with st.expander(label, expanded=bool(notable)):
+        for summary in snap.source_summaries:
+            st.markdown(f"**{summary.source_name}**")
+            cols = st.columns(4)
+            cols[0].metric("Pages scanned", summary.pages_scanned)
+            cols[1].metric("Pages failed", summary.pages_failed)
+            cols[2].metric("Items in range", summary.items_in_range)
+            cols[3].metric(
+                "Zero-hit pages",
+                summary.pages_with_zero_hits,
+                help=(
+                    "Successful fetches that returned 0 rows. A non-zero "
+                    "count usually means the container selector is "
+                    "mismatched on this source."
+                ),
+            )
+
+            if summary.early_stopped and summary.early_stop_reason:
+                st.info(
+                    f"⏱ Early-stopped on {summary.early_stop_reason}",
+                    icon="⏱️",
+                )
+            elif summary.early_stopped:
+                st.info("⏱ Early-stopped (date range exceeded).", icon="⏱️")
+
+            if summary.page_failures:
+                st.warning(
+                    f"⚠️ {len(summary.page_failures)} page failure(s):",
+                    icon="⚠️",
+                )
+                for pf in summary.page_failures:
+                    st.text(
+                        f"  · page {pf.get('page', '?')} "
+                        f"({pf.get('url', '')}): {pf.get('error', '')}"
+                    )
+
+            if summary.pages_with_zero_hits:
+                st.warning(
+                    f"⚠️ {summary.pages_with_zero_hits} page(s) fetched but "
+                    "returned zero rows. Re-check the container selector "
+                    "for this source in **Settings → Scraper Configuration**.",
+                    icon="🔍",
+                )
+
+            if not (summary.early_stopped or summary.page_failures or summary.pages_with_zero_hits):
+                st.caption(
+                    "No notable events for this source — "
+                    f"{summary.items_in_range} item(s) in range."
+                )
+            st.divider()
 
 
 @st.fragment(run_every=0.5)
@@ -199,6 +320,7 @@ __all__ = [
     "K_JOB_HANDLE",
     "K_PROGRESS_SNAPSHOT",
     "ProgressSnapshot",
+    "SourceSummary",
     "render",
     "reset_snapshot",
 ]

@@ -3,6 +3,16 @@
 Exposes grouping-level operations (add / rename / delete) and rule-level
 editing via ``st.data_editor``. Supports CSV/Excel upload for bulk rule
 creation and CSV export for round-tripping into spreadsheets.
+
+Iter 12 refinements:
+
+- All save / upload / delete actions show inline ``st.success`` /
+  ``st.error`` / ``st.warning`` banners. Banners stage in session state so
+  they survive the ``st.rerun()`` that runs immediately after a successful
+  mutation.
+- "Delete grouping" uses a two-step confirmation: first click flips a
+  session-state flag and relabels the button to "⚠️ Click again to
+  confirm"; second click within the same session executes.
 """
 
 from __future__ import annotations
@@ -21,6 +31,29 @@ from config import (
     save_categorizers,
 )
 
+#: One-shot inline status banner that survives an ``st.rerun()``. Entry is
+#: a ``(level, message)`` tuple; the panel consumes it on the next render.
+_STATUS_KEY = "categorizer_form_status"
+
+
+def _flash(level: str, message: str) -> None:
+    st.session_state[_STATUS_KEY] = (level, message)
+
+
+def _consume_status() -> None:
+    pending = st.session_state.pop(_STATUS_KEY, None)
+    if pending is None:
+        return
+    level, message = pending
+    if level == "success":
+        st.success(message)
+    elif level == "error":
+        st.error(message)
+    elif level == "warning":
+        st.warning(message)
+    else:
+        st.info(message)
+
 
 def _add_grouping_form(groupings: list[CategorizerGrouping]) -> None:
     with st.form("add_grouping"):
@@ -37,7 +70,7 @@ def _add_grouping_form(groupings: list[CategorizerGrouping]) -> None:
             return
         groupings = list(groupings) + [CategorizerGrouping(name=new_name, rules=[])]
         save_categorizers(groupings)
-        st.success(f"Added grouping '{new_name}'.")
+        _flash("success", f"Added grouping '{new_name}'.")
         st.rerun()
 
 
@@ -56,14 +89,17 @@ def _edit_grouping(grouping: CategorizerGrouping, all_groupings: list[Categorize
             else:
                 new_rules = rules_from_excel(upload.getvalue())
         except Exception as e:  # noqa: BLE001  — surface parse errors to the UI
-            st.error(f"Upload failed: {e}")
+            st.error(f"Upload failed for '{upload.name}': {e}")
         else:
             updated = [
                 g if g.name != grouping.name else CategorizerGrouping(name=g.name, rules=new_rules)
                 for g in all_groupings
             ]
             save_categorizers(updated)
-            st.success(f"Imported {len(new_rules)} rule(s) into '{grouping.name}'.")
+            _flash(
+                "success",
+                f"Imported {len(new_rules)} rule(s) into '{grouping.name}' from {upload.name}.",
+            )
             st.rerun()
 
     df = rules_to_dataframe(grouping.rules)
@@ -97,7 +133,10 @@ def _edit_grouping(grouping: CategorizerGrouping, all_groupings: list[Categorize
                 for g in all_groupings
             ]
             save_categorizers(updated)
-            st.success(f"Saved {len(new_rules)} rule(s) for '{grouping.name}'.")
+            _flash(
+                "success",
+                f"Saved {len(new_rules)} rule(s) for '{grouping.name}'.",
+            )
             st.rerun()
 
     csv_bytes = df.to_csv(index=False).encode("utf-8")
@@ -109,18 +148,31 @@ def _edit_grouping(grouping: CategorizerGrouping, all_groupings: list[Categorize
         key=f"export_{grouping.name}",
     )
 
-    if c3.button(
-        f"Delete grouping '{grouping.name}'",
-        key=f"del_{grouping.name}",
-        type="secondary",
-    ):
+    confirm_key = f"del_confirm_{grouping.name}"
+    pending = bool(st.session_state.get(confirm_key))
+    delete_label = (
+        f"⚠️ Click again to confirm delete '{grouping.name}'"
+        if pending
+        else f"Delete grouping '{grouping.name}'"
+    )
+    if c3.button(delete_label, key=f"del_{grouping.name}", type="secondary"):
+        if not pending:
+            st.session_state[confirm_key] = True
+            st.warning(
+                f"Delete grouping '{grouping.name}'? "
+                f"This will remove {len(grouping.rules)} rule(s) permanently. "
+                "Click the red button again to confirm."
+            )
+            return
         updated = [g for g in all_groupings if g.name != grouping.name]
         save_categorizers(updated)
-        st.success(f"Deleted grouping '{grouping.name}'.")
+        st.session_state.pop(confirm_key, None)
+        _flash("success", f"Deleted grouping '{grouping.name}'.")
         st.rerun()
 
 
 def render() -> None:
+    _consume_status()
     groupings = load_categorizers()
     _add_grouping_form(groupings)
     st.divider()
