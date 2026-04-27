@@ -107,6 +107,23 @@ def _save_entries(entries: list[RunHistoryEntry]) -> None:
     atomic_write_text(history_path(), json.dumps(payload, indent=2, ensure_ascii=False))
 
 
+def clear_entries() -> int:
+    """Atomically wipe the history file. Returns the number of entries removed.
+
+    Surfaced through the dashboard's "Clear History" button (Iter 13).
+    Like :func:`append_entry`, this is best-effort — any I/O error is
+    logged and swallowed so a corrupt history file can't take the UI
+    down. Returns ``0`` on failure for the same reason.
+    """
+    try:
+        before = len(load_entries())
+        _save_entries([])
+        return before
+    except Exception:
+        logger.exception("failed to clear run_history; ignoring")
+        return 0
+
+
 def append_entry(entry: RunHistoryEntry) -> None:
     """Add ``entry`` to the head of the history, capping at ``MAX_ENTRIES``.
 
@@ -175,6 +192,7 @@ __all__ = [
     "RunHistoryEntry",
     "append_entry",
     "build_entry_from_results",
+    "clear_entries",
     "history_path",
     "load_entries",
 ]

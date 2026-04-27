@@ -14,6 +14,7 @@ from scraper.run_history import (
     RunHistoryEntry,
     append_entry,
     build_entry_from_results,
+    clear_entries,
     history_path,
     load_entries,
 )
@@ -129,6 +130,38 @@ def test_build_entry_from_results_aggregates_per_source_stats():
     assert entry.error_count == 1
     assert entry.error_lines == ["Alpha: page 3: boom"]
     assert entry.cancelled is False
+
+
+def test_clear_entries_wipes_disk_and_returns_count_removed():
+    """Iter 13 — Clear History button calls this; must reset the file."""
+    append_entry(_entry("First"))
+    append_entry(_entry("Second"))
+    append_entry(_entry("Third"))
+    assert len(load_entries()) == 3
+
+    removed = clear_entries()
+
+    assert removed == 3
+    assert load_entries() == []
+    # File still exists but holds an empty entries list — load is idempotent.
+    assert history_path().exists()
+
+
+def test_clear_entries_on_empty_history_is_a_noop_returning_zero():
+    """Wiping when there's nothing to wipe must not error."""
+    assert load_entries() == []
+    assert clear_entries() == 0
+    assert load_entries() == []
+
+
+def test_clear_entries_then_append_starts_fresh():
+    """After a clear, subsequent appends are the only entries on disk."""
+    append_entry(_entry("Old"))
+    clear_entries()
+    append_entry(_entry("Fresh"))
+
+    [loaded] = load_entries()
+    assert loaded.source_names == ["Fresh"]
 
 
 def test_build_entry_truncates_excessive_error_lines():

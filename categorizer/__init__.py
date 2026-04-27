@@ -2,7 +2,9 @@
 
 Iter 2 shipped ``rules.py`` (CSV/Excel import/export).
 Iter 5 added ``engine.py`` — token-matching + multi-category explosion.
-Iter 6 adds ``pivot.py`` — Source × Category pivot with full-category reindex.
+Iter 6 added ``pivot.py`` — Source × Category numeric pivot. That has
+been replaced (Iter 13) by a 2-way Category × Month aggregation with
+numbered-list cell strings; see :mod:`categorizer.pivot` for details.
 """
 
 from categorizer.engine import (
@@ -17,10 +19,15 @@ from categorizer.engine import (
     rule_matches,
 )
 from categorizer.pivot import (
-    PIVOT_TOTAL_COL,
-    PIVOT_TOTAL_ROW,
-    build_all_pivots,
-    build_pivot,
+    COLUMN_LEVEL_NAMES,
+    INDEX_NAME,
+    INDONESIAN_MONTHS,
+    SUBCOLUMNS,
+    aggregation_to_html,
+    build_aggregation,
+    build_all_aggregations,
+    month_label,
+    numbered_list,
 )
 from categorizer.rules import (
     rules_from_csv,
@@ -31,18 +38,23 @@ from categorizer.rules import (
 )
 
 __all__ = [
+    "COLUMN_LEVEL_NAMES",
     "GROUPING_COLUMNS",
-    "PIVOT_TOTAL_COL",
-    "PIVOT_TOTAL_ROW",
+    "INDEX_NAME",
+    "INDONESIAN_MONTHS",
     "RAW_COLUMNS",
-    "build_all_pivots",
-    "build_pivot",
+    "SUBCOLUMNS",
+    "aggregation_to_html",
+    "build_aggregation",
+    "build_all_aggregations",
     "categorize_all_groupings",
     "categorize_items_to_frame",
     "is_globally_excluded",
     "items_to_raw_dataframe",
     "matches_for_title",
+    "month_label",
     "normalize",
+    "numbered_list",
     "rule_matches",
     "rules_from_csv",
     "rules_from_dataframe",

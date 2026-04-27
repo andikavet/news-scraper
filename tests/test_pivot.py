@@ -1,15 +1,34 @@
-"""Unit tests for the Iter 6 pivot builder."""
+"""Unit tests for the Iter 13 2-way Category × Month aggregation builder.
+
+The Iter 6 numeric Source × Category pivot was replaced by a string-valued
+``Category × MultiIndex(Month, [Title, Link, Date])`` aggregation. These
+tests pin the new shape's invariants:
+
+- Every category from the grouping rules is present as a row, sorted
+  ascending, even when no item matched it.
+- Columns are a 2-level ``MultiIndex(Month, [Title, Link, Date])`` where
+  the months are derived from the data and ordered chronologically.
+- Cell values are strings of numbered lists separated by ``\\n``.
+- The HTML renderer respects ``\\n`` via ``white-space: pre-wrap`` CSS.
+"""
 
 from __future__ import annotations
+
+from datetime import datetime
 
 import pandas as pd
 
 from categorizer.engine import categorize_items_to_frame
 from categorizer.pivot import (
-    PIVOT_TOTAL_COL,
-    PIVOT_TOTAL_ROW,
-    build_all_pivots,
-    build_pivot,
+    COLUMN_LEVEL_NAMES,
+    INDEX_NAME,
+    INDONESIAN_MONTHS,
+    SUBCOLUMNS,
+    aggregation_to_html,
+    build_aggregation,
+    build_all_aggregations,
+    month_label,
+    numbered_list,
 )
 from config import CategorizerGrouping, CategoryRule
 from scraper.models import NewsItem
@@ -23,147 +42,381 @@ def _grouping(name: str, rules: list[CategoryRule]) -> CategorizerGrouping:
     return CategorizerGrouping(name=name, rules=rules)
 
 
-def _item(title: str, source: str = "PortalA", page: int = 1) -> NewsItem:
+def _item(
+    title: str,
+    *,
+    source: str = "PortalA",
+    page: int = 1,
+    date_parsed: datetime | None = None,
+    date_raw: str = "",
+) -> NewsItem:
     return NewsItem(
         title=title,
         link=f"https://example.com/{title.replace(' ', '-').lower()}",
-        date_raw="",
-        date_parsed=None,
+        date_raw=date_raw or (date_parsed.strftime("%d %b %Y") if date_parsed else ""),
+        date_parsed=date_parsed,
         source=source,
         page=page,
     )
 
 
 # --------------------------------------------------------------------------- #
-# Full-category reindex (the headline PRD requirement)
+# Helpers
 # --------------------------------------------------------------------------- #
 
 
-def test_pivot_includes_every_configured_category_even_with_zero_matches() -> None:
+def test_numbered_list_format() -> None:
+    assert numbered_list([]) == ""
+    assert numbered_list(["alpha"]) == "1. alpha"
+    assert numbered_list(["alpha", "beta", "gamma"]) == "1. alpha\n2. beta\n3. gamma"
+
+
+def test_month_label_uses_indonesian_names() -> None:
+    assert month_label(datetime(2026, 1, 15)) == "Januari 2026"
+    assert month_label(datetime(2026, 12, 31)) == "Desember 2026"
+    # Each month constant individually.
+    for n, name in INDONESIAN_MONTHS.items():
+        assert month_label(datetime(2026, n, 1)) == f"{name} 2026"
+
+
+# --------------------------------------------------------------------------- #
+# Row index: every category, sorted ascending, even with no data
+# --------------------------------------------------------------------------- #
+
+
+def test_all_categories_present_sorted_ascending_even_with_zero_matches() -> None:
     grouping = _grouping(
         "Sektor",
         [
-            _rule("Agri", ["pertanian"]),
+            # Declaration order is Energi, Agri, Tambang — but the row index
+            # must be sorted ascending alphabetically. Tambang has no
+            # matching item below.
             _rule("Energi", ["bbm"]),
-            _rule("Tambang", ["tambang"]),  # never matched below
+            _rule("Agri", ["pertanian"]),
+            _rule("Tambang", ["tambang"]),
         ],
     )
-    items = [_item("Harga BBM naik"), _item("Produksi pertanian stabil")]
-    frame = categorize_items_to_frame(items, grouping)
-
-    pivot = build_pivot(frame, grouping)
-
-    # Column order mirrors rule declaration order, plus a trailing Total col.
-    assert list(pivot.columns) == ["Agri", "Energi", "Tambang", PIVOT_TOTAL_COL]
-    # Tambang column exists as zeros even though nothing matched it.
-    assert int(pivot.loc["PortalA", "Tambang"]) == 0
-    # Non-zero matches are counted correctly.
-    assert int(pivot.loc["PortalA", "Agri"]) == 1
-    assert int(pivot.loc["PortalA", "Energi"]) == 1
-
-
-# --------------------------------------------------------------------------- #
-# Multi-source + multi-category totals
-# --------------------------------------------------------------------------- #
-
-
-def test_pivot_totals_row_and_column() -> None:
-    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"]), _rule("Energi", ["bbm"])])
     items = [
-        _item("Harga BBM dan pertanian naik", source="PortalA"),  # 2 matches A
-        _item("Produksi pertanian stabil", source="PortalA"),  # Agri A
-        _item("Harga BBM turun", source="PortalB"),  # Energi B
+        _item("Harga BBM naik", date_parsed=datetime(2026, 1, 10)),
+        _item("Produksi pertanian stabil", date_parsed=datetime(2026, 1, 20)),
     ]
     frame = categorize_items_to_frame(items, grouping)
 
-    pivot = build_pivot(frame, grouping)
+    agg = build_aggregation(frame, grouping)
 
-    # Per-source row totals
-    assert int(pivot.loc["PortalA", PIVOT_TOTAL_COL]) == 3
-    assert int(pivot.loc["PortalB", PIVOT_TOTAL_COL]) == 1
-    # Grand total row is the sum of per-source totals
-    assert int(pivot.loc[PIVOT_TOTAL_ROW, PIVOT_TOTAL_COL]) == 4
-    # Per-category column totals
-    assert int(pivot.loc[PIVOT_TOTAL_ROW, "Agri"]) == 2
-    assert int(pivot.loc[PIVOT_TOTAL_ROW, "Energi"]) == 2
+    # Sorted ascending alphabetical — NOT declaration order.
+    assert list(agg.index) == ["Agri", "Energi", "Tambang"]
+    assert agg.index.name == INDEX_NAME
+    # Tambang row exists; each of its cells is empty string.
+    assert all(agg.loc["Tambang", col] == "" for col in agg.columns)
 
 
-def test_pivot_rows_are_sources_exploded_counted_once_per_category() -> None:
-    """A 2-rule-matching article contributes once to each category — not twice."""
-    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"]), _rule("Energi", ["bbm"])])
-    items = [_item("Harga BBM dan pertanian naik", source="PortalA")]
-    frame = categorize_items_to_frame(items, grouping)
-
-    pivot = build_pivot(frame, grouping)
-
-    assert int(pivot.loc["PortalA", "Agri"]) == 1
-    assert int(pivot.loc["PortalA", "Energi"]) == 1
-
-
-# --------------------------------------------------------------------------- #
-# Edge cases
-# --------------------------------------------------------------------------- #
-
-
-def test_pivot_empty_frame_still_shows_every_category_as_zero_column() -> None:
-    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"]), _rule("Energi", ["bbm"])])
+def test_empty_frame_keeps_all_categories_with_no_month_columns() -> None:
+    grouping = _grouping(
+        "Sektor",
+        [_rule("Agri", ["pertanian"]), _rule("Energi", ["bbm"])],
+    )
     empty = categorize_items_to_frame([], grouping)
 
-    pivot = build_pivot(empty, grouping)
+    agg = build_aggregation(empty, grouping)
 
-    assert list(pivot.columns) == ["Agri", "Energi", PIVOT_TOTAL_COL]
-    # No source rows, no Total row — the header of categories is the point.
-    assert len(pivot) == 0
+    assert list(agg.index) == ["Agri", "Energi"]
+    assert len(agg.columns) == 0  # no months in data → no month columns
+    assert agg.columns.names == list(COLUMN_LEVEL_NAMES)
 
 
-def test_pivot_grouping_with_no_rules_returns_empty_frame() -> None:
+def test_grouping_with_no_rules_returns_empty_frame() -> None:
     grouping = _grouping("Empty", [])
     frame = pd.DataFrame(columns=["Category", "Date", "Source", "Title", "Link", "Page"])
 
-    pivot = build_pivot(frame, grouping)
+    agg = build_aggregation(frame, grouping)
 
-    assert pivot.empty
-    assert list(pivot.columns) == []
+    assert agg.empty
+    assert list(agg.columns) == []
 
 
-def test_build_all_pivots_keyed_by_grouping_name() -> None:
+# --------------------------------------------------------------------------- #
+# Column structure: MultiIndex(Month, [Title, Link, Date]), chronological
+# --------------------------------------------------------------------------- #
+
+
+def test_columns_are_multiindex_with_three_subcolumns_per_month() -> None:
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [_item("Pertanian Jan", date_parsed=datetime(2026, 1, 5))]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping)
+
+    assert agg.columns.nlevels == 2
+    assert agg.columns.names == list(COLUMN_LEVEL_NAMES)
+    months = agg.columns.get_level_values("Month").unique().tolist()
+    assert months == ["Januari 2026"]
+    fields = agg.columns.get_level_values("Field").tolist()
+    assert fields == SUBCOLUMNS
+
+
+def test_months_are_ordered_chronologically_not_alphabetically() -> None:
+    """Februari < Maret < Januari alphabetically, but chronological order wins."""
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [
+        _item("Pertanian Mar", date_parsed=datetime(2026, 3, 1)),
+        _item("Pertanian Jan", date_parsed=datetime(2026, 1, 1)),
+        _item("Pertanian Feb", date_parsed=datetime(2026, 2, 1)),
+    ]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping)
+
+    months = agg.columns.get_level_values("Month").unique().tolist()
+    assert months == ["Januari 2026", "Februari 2026", "Maret 2026"]
+
+
+def test_year_boundary_orders_chronologically() -> None:
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [
+        _item("Pertanian Jan 2026", date_parsed=datetime(2026, 1, 5)),
+        _item("Pertanian Dec 2025", date_parsed=datetime(2025, 12, 25)),
+    ]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping)
+
+    months = agg.columns.get_level_values("Month").unique().tolist()
+    assert months == ["Desember 2025", "Januari 2026"]
+
+
+# --------------------------------------------------------------------------- #
+# Cell content: numbered lists with `\n` separators
+# --------------------------------------------------------------------------- #
+
+
+def test_cells_are_numbered_lists_with_newline_separators() -> None:
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [
+        _item(
+            "First Article",
+            date_parsed=datetime(2026, 1, 5),
+        ),
+        _item(
+            "Second Article",
+            date_parsed=datetime(2026, 1, 20),
+        ),
+    ]
+    items[0] = NewsItem(
+        title="First Article: pertanian naik",
+        link="https://link1.com",
+        date_raw="",
+        date_parsed=datetime(2026, 1, 5),
+        source="PortalA",
+        page=1,
+    )
+    items[1] = NewsItem(
+        title="Second Article: pertanian stabil",
+        link="https://link2.com",
+        date_raw="",
+        date_parsed=datetime(2026, 1, 20),
+        source="PortalA",
+        page=1,
+    )
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping)
+
+    title_cell = agg.loc["Agri", ("Januari 2026", "Title")]
+    link_cell = agg.loc["Agri", ("Januari 2026", "Link")]
+    date_cell = agg.loc["Agri", ("Januari 2026", "Date")]
+
+    assert title_cell == ("1. First Article: pertanian naik\n2. Second Article: pertanian stabil")
+    assert link_cell == "1. https://link1.com\n2. https://link2.com"
+    # Dates are the engine-formatted DD-MM-YYYY strings.
+    assert date_cell == "1. 05-01-2026\n2. 20-01-2026"
+
+
+def test_single_item_cell_is_a_one_element_numbered_list() -> None:
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [_item("Pertanian solo", date_parsed=datetime(2026, 4, 1))]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping)
+
+    assert agg.loc["Agri", ("April 2026", "Title")] == "1. Pertanian solo"
+
+
+def test_cells_for_uncovered_category_or_month_are_empty_strings() -> None:
+    grouping = _grouping(
+        "Sektor",
+        [_rule("Agri", ["pertanian"]), _rule("Energi", ["bbm"])],
+    )
+    # Only Agri has data, only in Februari.
+    items = [_item("Pertanian Feb", date_parsed=datetime(2026, 2, 1))]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping)
+
+    assert agg.loc["Energi", ("Februari 2026", "Title")] == ""
+    assert agg.loc["Energi", ("Februari 2026", "Link")] == ""
+    assert agg.loc["Energi", ("Februari 2026", "Date")] == ""
+
+
+def test_undated_items_are_dropped_from_aggregation() -> None:
+    """An item whose date can't be parsed has no month bucket — silently omitted."""
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [
+        _item("Pertanian Jan", date_parsed=datetime(2026, 1, 5)),
+        _item("Pertanian undated", date_raw="not a date"),
+    ]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping)
+
+    cell = agg.loc["Agri", ("Januari 2026", "Title")]
+    # Only the dated item appears.
+    assert cell == "1. Pertanian Jan"
+
+
+# --------------------------------------------------------------------------- #
+# Multi-source aggregation collapses across sources (no Source axis)
+# --------------------------------------------------------------------------- #
+
+
+def test_items_from_multiple_sources_collapse_into_same_category_month_cell() -> None:
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [
+        NewsItem(
+            title="A: pertanian",
+            link="https://a.example.com/x",
+            date_raw="",
+            date_parsed=datetime(2026, 1, 5),
+            source="PortalA",
+            page=1,
+        ),
+        NewsItem(
+            title="B: pertanian",
+            link="https://b.example.com/x",
+            date_raw="",
+            date_parsed=datetime(2026, 1, 6),
+            source="PortalB",
+            page=1,
+        ),
+    ]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping)
+
+    cell = agg.loc["Agri", ("Januari 2026", "Title")]
+    assert "1. A: pertanian" in cell
+    assert "2. B: pertanian" in cell
+    assert cell.count("\n") == 1  # exactly one separator between two items
+
+
+# --------------------------------------------------------------------------- #
+# build_all_aggregations
+# --------------------------------------------------------------------------- #
+
+
+def test_build_all_aggregations_keyed_by_grouping_name() -> None:
     g1 = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
     g2 = _grouping("Pengeluaran", [_rule("Konsumsi", ["konsumsi"])])
-    items = [_item("Konsumsi rumah tangga naik"), _item("Produksi pertanian stabil")]
+    items = [
+        _item("Konsumsi rumah tangga naik", date_parsed=datetime(2026, 2, 1)),
+        _item("Produksi pertanian stabil", date_parsed=datetime(2026, 2, 2)),
+    ]
     frames = {
         "Sektor": categorize_items_to_frame(items, g1),
         "Pengeluaran": categorize_items_to_frame(items, g2),
     }
 
-    pivots = build_all_pivots(frames, [g1, g2])
+    aggregations = build_all_aggregations(frames, [g1, g2])
 
-    assert set(pivots.keys()) == {"Sektor", "Pengeluaran"}
-    assert int(pivots["Sektor"].loc["PortalA", "Agri"]) == 1
-    assert int(pivots["Pengeluaran"].loc["PortalA", "Konsumsi"]) == 1
+    assert set(aggregations.keys()) == {"Sektor", "Pengeluaran"}
+    assert (
+        "1. Produksi pertanian stabil"
+        in aggregations["Sektor"].loc["Agri", ("Februari 2026", "Title")]
+    )
+    assert (
+        "1. Konsumsi rumah tangga naik"
+        in aggregations["Pengeluaran"].loc["Konsumsi", ("Februari 2026", "Title")]
+    )
 
 
-def test_pivot_unknown_source_from_edits_appears_as_its_own_row() -> None:
-    """If the user edits rows via data_editor to change Source, the pivot reflects that.
+# --------------------------------------------------------------------------- #
+# Edited-frame paths (Update Aggregation button)
+# --------------------------------------------------------------------------- #
 
-    We simulate the result of an edit: the exploded frame has a Source the
-    original scraper wouldn't have emitted. This is exactly the flow that
-    'Update Pivot' triggers.
-    """
+
+def test_edited_frame_with_unknown_category_is_silently_skipped() -> None:
+    """Index is rules-based; an edited row whose Category isn't in the grouping is dropped."""
     grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
     edited_frame = pd.DataFrame(
         [
             {
                 "Category": "Agri",
-                "Date": "01-04-2026",
-                "Source": "ManuallyEntered",
-                "Title": "Pertanian swasembada",
+                "Date": "05-01-2026",
+                "Source": "PortalA",
+                "Title": "Pertanian valid",
                 "Link": "https://example.com/x",
                 "Page": 1,
-            }
+            },
+            {
+                "Category": "InvasiveCategory",  # not in grouping rules
+                "Date": "05-01-2026",
+                "Source": "PortalA",
+                "Title": "Should not appear",
+                "Link": "https://example.com/y",
+                "Page": 1,
+            },
         ]
     )
 
-    pivot = build_pivot(edited_frame, grouping)
+    agg = build_aggregation(edited_frame, grouping)
 
-    assert "ManuallyEntered" in pivot.index
-    assert int(pivot.loc["ManuallyEntered", "Agri"]) == 1
+    assert list(agg.index) == ["Agri"]
+    cell = agg.loc["Agri", ("Januari 2026", "Title")]
+    assert cell == "1. Pertanian valid"
+
+
+# --------------------------------------------------------------------------- #
+# HTML rendering
+# --------------------------------------------------------------------------- #
+
+
+def test_aggregation_to_html_emits_pre_wrap_css_for_newline_preservation() -> None:
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [
+        NewsItem(
+            title="A: pertanian",
+            link="https://a.example.com/x",
+            date_raw="",
+            date_parsed=datetime(2026, 1, 5),
+            source="PortalA",
+            page=1,
+        ),
+        NewsItem(
+            title="B: pertanian",
+            link="https://b.example.com/x",
+            date_raw="",
+            date_parsed=datetime(2026, 1, 6),
+            source="PortalA",
+            page=1,
+        ),
+    ]
+    frame = categorize_items_to_frame(items, grouping)
+    agg = build_aggregation(frame, grouping)
+
+    html = aggregation_to_html(agg)
+
+    # The CSS rule that makes `\n` render as visible line breaks.
+    assert "white-space: pre-wrap" in html
+    # The wrapper class the dashboard scopes its CSS under.
+    assert 'class="aggregation-wrapper"' in html
+    # The actual numbered-list content survives the HTML conversion.
+    assert "1. A: pertanian" in html
+    assert "2. B: pertanian" in html
+
+
+def test_aggregation_to_html_returns_empty_string_for_empty_frame() -> None:
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    empty = categorize_items_to_frame([], grouping)
+    agg = build_aggregation(empty, grouping)
+
+    assert aggregation_to_html(agg) == ""
