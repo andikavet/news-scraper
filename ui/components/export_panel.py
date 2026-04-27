@@ -117,9 +117,7 @@ def build_workbook_bytes(
             # the category index column so the sheet still exists with the
             # full row list — keeps the workbook structure predictable.
             if len(agg_df.columns) == 0:
-                pd.DataFrame(index=agg_df.index).to_excel(
-                    writer, sheet_name=agg_sheet, index=True
-                )
+                pd.DataFrame(index=agg_df.index).to_excel(writer, sheet_name=agg_sheet, index=True)
             else:
                 # Aggregation keeps its Category index + 2-level MultiIndex
                 # column header. Excel renders both natively; the

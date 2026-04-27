@@ -154,9 +154,7 @@ def build_aggregation(
         .tolist()
     )
 
-    columns = pd.MultiIndex.from_product(
-        [month_order, SUBCOLUMNS], names=list(COLUMN_LEVEL_NAMES)
-    )
+    columns = pd.MultiIndex.from_product([month_order, SUBCOLUMNS], names=list(COLUMN_LEVEL_NAMES))
     out = pd.DataFrame(
         "",
         index=pd.Index(categories, name=INDEX_NAME),
@@ -172,15 +170,9 @@ def build_aggregation(
             # so such rows are silently skipped.
             continue
         sub_sorted = sub.sort_values("_dt", kind="stable")
-        out.loc[cat, (month, "Title")] = numbered_list(
-            sub_sorted["Title"].astype(str).tolist()
-        )
-        out.loc[cat, (month, "Link")] = numbered_list(
-            sub_sorted["Link"].astype(str).tolist()
-        )
-        out.loc[cat, (month, "Date")] = numbered_list(
-            sub_sorted["Date"].astype(str).tolist()
-        )
+        out.loc[cat, (month, "Title")] = numbered_list(sub_sorted["Title"].astype(str).tolist())
+        out.loc[cat, (month, "Link")] = numbered_list(sub_sorted["Link"].astype(str).tolist())
+        out.loc[cat, (month, "Date")] = numbered_list(sub_sorted["Date"].astype(str).tolist())
 
     return out
 

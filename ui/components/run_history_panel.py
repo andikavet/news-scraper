@@ -135,11 +135,7 @@ def _render_clear_button(entry_count: int) -> None:
     case so the user gets the visual hint anyway.
     """
     pending = bool(st.session_state.get(_CLEAR_CONFIRM_KEY))
-    label = (
-        "⚠️ Click again to confirm clear"
-        if pending
-        else f"Clear history ({entry_count})"
-    )
+    label = "⚠️ Click again to confirm clear" if pending else f"Clear history ({entry_count})"
     clicked = st.button(
         label,
         key="run_history_clear_btn",
