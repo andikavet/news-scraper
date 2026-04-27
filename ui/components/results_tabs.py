@@ -32,7 +32,8 @@ import streamlit as st
 
 from categorizer import (
     GROUPING_COLUMNS,
-    build_pivot,
+    aggregation_to_html,
+    build_aggregation,
     categorize_items_to_frame,
     items_to_raw_dataframe,
 )
@@ -171,26 +172,36 @@ def _render_grouping_tab(
     # snapshot so the frame survives reruns triggered by other widgets.
     st.session_state[editor_k] = new_edited
 
-    st.markdown("##### Pivot: Source × Category")
-    pivot_col, btn_col = st.columns([1, 0.22])
+    st.markdown("##### Aggregation: Category × Month")
+    st.caption(
+        "Rows show **every category** in this grouping (sorted ascending). "
+        "Columns expand by month derived from the article date. Each cell is "
+        "a numbered list of the actual article fields — newlines are preserved."
+    )
+    btn_col, _ = st.columns([0.22, 1])
     with btn_col:
         update_clicked = st.button(
-            "Update Pivot",
+            "Update Aggregation",
             key=f"update_pivot__{grouping.name}",
             use_container_width=True,
-            help="Rebuild the pivot from the currently-edited rows above.",
+            help="Rebuild the aggregation from the currently-edited rows above.",
         )
 
     pivot_snap_k = _pivot_snapshot_key(grouping.name)
     if update_clicked or pivot_snap_k not in st.session_state:
-        st.session_state[pivot_snap_k] = build_pivot(new_edited, grouping)
+        st.session_state[pivot_snap_k] = build_aggregation(new_edited, grouping)
 
     pivot_df: pd.DataFrame = st.session_state[pivot_snap_k]
-    with pivot_col:
-        if pivot_df.empty:
-            st.caption("No rows to pivot yet — edit the table above or click **Update Pivot**.")
-        else:
-            st.dataframe(pivot_df, use_container_width=True)
+    if pivot_df.empty or len(pivot_df.columns) == 0:
+        st.caption(
+            "No dated rows to aggregate yet — edit the table above or click "
+            "**Update Aggregation** after a scrape produces dated items."
+        )
+    else:
+        # `st.dataframe` collapses `\n` into a single visual line; we render
+        # an HTML table whose CSS has `white-space: pre-wrap` so each
+        # numbered-list cell renders across multiple lines as required.
+        st.markdown(aggregation_to_html(pivot_df), unsafe_allow_html=True)
 
 
 def render(

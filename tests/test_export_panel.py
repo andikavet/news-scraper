@@ -81,15 +81,15 @@ def app_settings() -> AppSettings:
 
 
 def test_workbook_has_one_sheet_per_grouping_pair_plus_raw(items, groupings, app_settings) -> None:
-    """Workbook layout: 1 raw sheet + 2 sheets per grouping (items + pivot)."""
+    """Workbook layout: 1 raw sheet + 2 sheets per grouping (items + aggregation)."""
     blob = build_workbook_bytes(items, groupings, app_settings)
     wb = load_workbook(io.BytesIO(blob))
     expected = {
         "Raw Data",
         "Sektor_items",
-        "Sektor_pivot",
+        "Sektor_aggregation",
         "Pengeluaran_items",
-        "Pengeluaran_pivot",
+        "Pengeluaran_aggregation",
     }
     assert set(wb.sheetnames) == expected
 
@@ -119,10 +119,15 @@ def test_grouping_items_sheet_explodes_multi_category_matches(
     assert categories == {"Agri", "Energi"}
 
 
-def test_pivot_sheet_includes_full_category_list_with_zero_counts(
+def test_aggregation_sheet_includes_every_category_as_a_row_even_with_no_data(
     items, groupings, app_settings
 ) -> None:
-    """Adding a rule that matches nothing must still produce a 0 column."""
+    """Adding a rule that matches nothing must still produce a category row.
+
+    Iter 13 swaps the numeric pivot for a 2-way Category × Month aggregation;
+    every category from the grouping rules must appear as a row, sorted
+    ascending, even when no item matched it.
+    """
     extended_grouping = CategorizerGrouping(
         name="Sektor",
         rules=[
@@ -133,10 +138,14 @@ def test_pivot_sheet_includes_full_category_list_with_zero_counts(
     )
     blob = build_workbook_bytes(items, [extended_grouping], app_settings)
     wb = load_workbook(io.BytesIO(blob))
-    pivot = wb["Sektor_pivot"]
-    # Header row contains: index column + Agri + Energi + Tambang + Total.
-    header = [pivot.cell(row=1, column=c).value for c in range(1, pivot.max_column + 1)]
-    assert "Tambang" in header
+    sheet = wb["Sektor_aggregation"]
+    # The aggregation has a 2-row header (Month, then Field) plus the
+    # Category-index column on the left. Every category appears under
+    # the index column regardless of data presence.
+    index_values = {
+        sheet.cell(row=r, column=1).value for r in range(1, sheet.max_row + 1)
+    }
+    assert {"Agri", "Energi", "Tambang"} <= index_values
 
 
 def test_global_exclude_tokens_drop_items_from_grouping_sheets_only(items, groupings) -> None:
