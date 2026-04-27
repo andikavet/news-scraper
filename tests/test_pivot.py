@@ -226,9 +226,7 @@ def test_cells_are_numbered_lists_with_newline_separators() -> None:
     link_cell = agg.loc["Agri", ("Januari 2026", "Link")]
     date_cell = agg.loc["Agri", ("Januari 2026", "Date")]
 
-    assert title_cell == (
-        "1. First Article: pertanian naik\n2. Second Article: pertanian stabil"
-    )
+    assert title_cell == ("1. First Article: pertanian naik\n2. Second Article: pertanian stabil")
     assert link_cell == "1. https://link1.com\n2. https://link2.com"
     # Dates are the engine-formatted DD-MM-YYYY strings.
     assert date_cell == "1. 05-01-2026\n2. 20-01-2026"
@@ -331,12 +329,14 @@ def test_build_all_aggregations_keyed_by_grouping_name() -> None:
     aggregations = build_all_aggregations(frames, [g1, g2])
 
     assert set(aggregations.keys()) == {"Sektor", "Pengeluaran"}
-    assert "1. Produksi pertanian stabil" in aggregations["Sektor"].loc[
-        "Agri", ("Februari 2026", "Title")
-    ]
-    assert "1. Konsumsi rumah tangga naik" in aggregations["Pengeluaran"].loc[
-        "Konsumsi", ("Februari 2026", "Title")
-    ]
+    assert (
+        "1. Produksi pertanian stabil"
+        in aggregations["Sektor"].loc["Agri", ("Februari 2026", "Title")]
+    )
+    assert (
+        "1. Konsumsi rumah tangga naik"
+        in aggregations["Pengeluaran"].loc["Konsumsi", ("Februari 2026", "Title")]
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -142,9 +142,7 @@ def test_aggregation_sheet_includes_every_category_as_a_row_even_with_no_data(
     # The aggregation has a 2-row header (Month, then Field) plus the
     # Category-index column on the left. Every category appears under
     # the index column regardless of data presence.
-    index_values = {
-        sheet.cell(row=r, column=1).value for r in range(1, sheet.max_row + 1)
-    }
+    index_values = {sheet.cell(row=r, column=1).value for r in range(1, sheet.max_row + 1)}
     assert {"Agri", "Energi", "Tambang"} <= index_values
 
 
