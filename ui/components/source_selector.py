@@ -4,6 +4,11 @@ For every configured source, render a checkbox and a pair of numeric
 inputs for Start/End page. ``End page`` defaults to
 ``source.avg_page_per_month × months_span`` so the user gets a sensible
 auto-suggestion they can still override.
+
+Iter 12: ``end_page`` auto-recalculates whenever ``months_span`` changes
+(i.e. whenever the user picks a new Time Range). Within a stable time
+range, manual edits to End Page persist; selecting a new time range
+forces a re-snap to the freshly-computed auto value.
 """
 
 from __future__ import annotations
@@ -43,7 +48,19 @@ def render(
         # Use (name, pagination_type) as a stable widget key so edits to a
         # source's selectors don't reset the checkbox state.
         base_key = f"{key_prefix}_{src.name}"
-        default_end = max(1, src.avg_page_per_month * months_span)
+        end_key = f"{base_key}_end"
+        prev_span_key = f"{base_key}_prev_span"
+        auto_end = max(1, src.avg_page_per_month * months_span)
+
+        # Re-snap End Page to the freshly-computed auto value whenever the
+        # months_span has changed (i.e. the user picked a new time range).
+        # Setting ``st.session_state[end_key]`` BEFORE the widget renders
+        # makes Streamlit honour the new default — otherwise ``value=`` is
+        # ignored on subsequent renders. Within a stable time range, this
+        # branch doesn't fire and the user's manual edit persists.
+        if st.session_state.get(prev_span_key) != months_span:
+            st.session_state[end_key] = auto_end
+            st.session_state[prev_span_key] = months_span
 
         cols = st.columns([3, 1, 1, 2])
         with cols[0]:
@@ -65,12 +82,13 @@ def render(
             end_page = st.number_input(
                 "End",
                 min_value=1,
-                value=default_end,
                 step=1,
-                key=f"{base_key}_end",
+                key=end_key,
                 help=(
-                    f"Auto: {src.avg_page_per_month} pages/month × {months_span} "
-                    f"month(s) = {default_end}"
+                    f"Auto-recalc on time range change: "
+                    f"{src.avg_page_per_month} pages/month × {months_span} "
+                    f"month(s) = {auto_end}. Edit to override; the next "
+                    f"time-range change will re-snap."
                 ),
             )
         with cols[3]:

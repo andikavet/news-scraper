@@ -121,11 +121,15 @@ def render() -> None:
     # -- A. Time Range ---------------------------------------------------- #
     st.subheader("A. Time Range")
     tr = time_range.render(key_prefix="tr_main")
-    span = time_range.months_span(tr)
+    # Iter 12: end_page auto-recalc uses "months from Now back to Start"
+    # rather than the inclusive start→end span. This matches the user's
+    # mental model — picking "Last Quarter" should size the End Page envelope
+    # to cover ~3 months of fetches regardless of how far back End is set.
+    months_back = time_range.compute_months_between(tr.start)
 
     # -- B. Target Scrapers + page range --------------------------------- #
     st.subheader("B. Target Scrapers & Page Range")
-    selections = source_selector.render(sources, months_span=span, key_prefix="ss_main")
+    selections = source_selector.render(sources, months_span=months_back, key_prefix="ss_main")
 
     # -- C. Action & Progress -------------------------------------------- #
     st.subheader("C. Action & Progress")
