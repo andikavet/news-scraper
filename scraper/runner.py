@@ -92,6 +92,17 @@ class RunStats:
     # user see at a glance "all 12 pages were served by Layer 1" vs "Layer 1
     # bounced 8 of them and Layer 2 picked up the slack".
     layer_usage: dict[int, int] = field(default_factory=dict)
+    # Iter 12: detail rows for the post-scrape summary panel.
+    # ``early_stop_reason`` is set whenever ``early_stopped`` becomes True,
+    # capturing the page number and the boundary date that triggered it.
+    # ``page_failures`` is one entry per failed page with the underlying
+    # error so the UI can list "page 3: all layers failed" without having
+    # to re-parse free-form strings.
+    # ``pages_with_zero_hits`` counts successful fetches that returned no
+    # rows — a strong signal that the container selector is mismatched.
+    early_stop_reason: str | None = None
+    page_failures: list[dict[str, str]] = field(default_factory=list)
+    pages_with_zero_hits: int = 0
 
 
 @dataclass
@@ -218,8 +229,14 @@ def run_url_params_source(
         stats.pages_scanned += 1
         if outcome is None:
             stats.pages_failed += 1
-            stats.errors.append(
-                f"page {req.page}: all layers failed ({'; '.join(per_layer_errors)})"
+            err_summary = "; ".join(per_layer_errors) if per_layer_errors else "all layers failed"
+            stats.errors.append(f"page {req.page}: all layers failed ({err_summary})")
+            stats.page_failures.append(
+                {
+                    "page": str(req.page),
+                    "url": req.url,
+                    "error": err_summary,
+                }
             )
             if bus is not None:
                 from scraper.progress import PageFailed
@@ -237,6 +254,8 @@ def run_url_params_source(
 
         hits = parse_for(outcome.parser_name, outcome.fetched.html, source.selectors)
         stats.items_scanned += len(hits)
+        if not hits:
+            stats.pages_with_zero_hits += 1
 
         page_in_range = 0
         oldest_seen_below_range = False
@@ -269,6 +288,11 @@ def run_url_params_source(
 
         if oldest_seen_below_range:
             stats.early_stopped = True
+            stats.early_stop_reason = (
+                f"page {req.page}: saw item dated before "
+                f"{time_range_start.isoformat()} (range start), so older "
+                f"pages would be redundant."
+            )
             logger.info(
                 "source %s: early-stopping at page %d (saw date below range start)",
                 source.name,
@@ -417,6 +441,8 @@ def run_browser_source(
                     break
                 hits = extract_items(snap.html, source.selectors)
                 stats.pages_scanned += 1
+                if not hits:
+                    stats.pages_with_zero_hits += 1
                 new_in_range, oldest_seen_below_range = _process_page_hits(
                     hits,
                     source_name=source.name,
@@ -441,6 +467,11 @@ def run_browser_source(
                     )
                 if oldest_seen_below_range:
                     stats.early_stopped = True
+                    stats.early_stop_reason = (
+                        f"page {snap.page}: saw item dated before "
+                        f"{time_range_start.isoformat()} (range start), so "
+                        f"older pages would be redundant."
+                    )
                     logger.info(
                         "source %s: early-stopping at page %d (saw date below range start)",
                         source.name,
@@ -451,6 +482,7 @@ def run_browser_source(
         logger.error("source %s: browser session failed: %s", source.name, e)
         stats.pages_failed += 1
         stats.errors.append(f"browser session failed: {e}")
+        stats.page_failures.append({"page": "(session)", "url": initial_url, "error": str(e)})
 
     return SourceRunResult(items=items, stats=stats)
 

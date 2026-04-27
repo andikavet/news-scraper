@@ -2,6 +2,11 @@
 
 Edits the AppSettings singleton (overall_exclude_tokens, sleep defaults,
 max_retries default, log level).
+
+Iter 12: every save action surfaces an inline ``st.success`` /
+``st.error`` /``st.warning`` banner. The success banner stages in session
+state so it survives the ``st.rerun()`` that fires immediately after a
+successful save.
 """
 
 from __future__ import annotations
@@ -10,8 +15,30 @@ import streamlit as st
 
 from config import AppSettings, load_app_settings, save_app_settings
 
+_STATUS_KEY = "global_settings_status"
+
+
+def _flash(level: str, message: str) -> None:
+    st.session_state[_STATUS_KEY] = (level, message)
+
+
+def _consume_status() -> None:
+    pending = st.session_state.pop(_STATUS_KEY, None)
+    if pending is None:
+        return
+    level, message = pending
+    if level == "success":
+        st.success(message)
+    elif level == "error":
+        st.error(message)
+    elif level == "warning":
+        st.warning(message)
+    else:
+        st.info(message)
+
 
 def render() -> None:
+    _consume_status()
     settings = load_app_settings()
     with st.form("global_settings_form"):
         excludes_raw = st.text_area(
@@ -65,7 +92,10 @@ def render() -> None:
                 log_level=log_level,
             )
         )
-        st.success("Saved.")
+        _flash(
+            "success",
+            f"Saved global settings ({len(tokens)} exclude token(s); log level={log_level}).",
+        )
         st.rerun()
 
 
