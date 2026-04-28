@@ -4,6 +4,11 @@ The 4-layer fallback strategy (PRD §4.1) works by trying layers in ascending
 order of complexity. Each concrete layer implements ``fetch()`` returning the
 raw page bytes/HTML, and the caller (``scraper.runner``) is responsible for
 parsing + retry + sleep.
+
+Iter 14: :meth:`Layer.fetch` accepts an optional ``wait_selector`` hint so
+JS-rendered layers (3 & 4) can block on the container becoming attached to
+the DOM before returning. HTTP-only layers (1 & 2) ignore the hint — the
+response body is already fully materialised by the time the layer returns.
 """
 
 from __future__ import annotations
@@ -36,12 +41,25 @@ class FetchResult:
 
 
 class Layer(Protocol):
-    """Interface implemented by every scraping layer."""
+    """Interface implemented by every scraping layer.
+
+    ``wait_selector`` is an optional CSS selector the layer should wait
+    for before reading the page's HTML. JS-rendered layers use it to
+    block until the listing is attached to the DOM instead of relying on
+    a generic ``networkidle`` state that never settles on ad-heavy
+    news sites. HTTP-only layers ignore the hint.
+    """
 
     layer_number: int
     name: str
 
-    def fetch(self, url: str, timeout: float = 20.0) -> FetchResult: ...
+    def fetch(
+        self,
+        url: str,
+        timeout: float = 20.0,
+        *,
+        wait_selector: str | None = None,
+    ) -> FetchResult: ...
 
 
 __all__ = ["FetchResult", "Layer", "ScrapeError"]

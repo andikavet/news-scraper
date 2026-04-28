@@ -12,6 +12,9 @@ set of patches that defeat the most common fingerprint-based bot checks:
 - ``navigator.languages`` is populated with an Indonesian-first locale
   chain to match a typical user on an ID portal.
 - ``window.chrome`` is stubbed with a minimal ``runtime`` object.
+- ``navigator.permissions.query`` is patched so "notifications" returns
+  ``prompt`` — headless Chromium uniquely returns ``denied`` there,
+  which some bot-detection scripts probe.
 - ``WebGLRenderingContext.getParameter`` returns realistic Intel/AMD
   vendor strings instead of the Chromium headless default
   (``Google SwiftShader``).
@@ -22,6 +25,17 @@ set of patches that defeat the most common fingerprint-based bot checks:
 The patches are applied via ``context.add_init_script`` so they run
 before any page script — the target site sees the patched values even if
 it probes the DOM immediately on load.
+
+Wait strategy (Iter 14 — matches Layer 3's refactor):
+
+- Default navigation gate is ``wait_until="domcontentloaded"``; when a
+  ``wait_selector`` is supplied (the source's container selector), the
+  layer then blocks on ``page.wait_for_selector(state="attached")``.
+- With no ``wait_selector``, the layer waits for ``wait_until="load"``.
+- ``networkidle`` is never used by default — it is unreliable on news
+  portals that run continuous analytics / ad beacons. The
+  ``wait_until`` init kwarg is retained for callers that still want to
+  override the default (e.g. the Iter 9 smoke test).
 
 Speed knobs mirror Layer 3: images / fonts / media are route-blocked so
 the browser only loads HTML + CSS + JS. Each fetch uses a fresh browser
@@ -83,7 +97,17 @@ Object.defineProperty(navigator, 'languages', {get: () => ['id-ID', 'id', 'en-US
 // 4. window.chrome stub (headless Chromium omits this by default)
 window.chrome = window.chrome || {runtime: {}};
 
-// 5. Spoof the WebGL vendor strings (headless uses SwiftShader → obvious tell)
+// 5. Patch navigator.permissions.query so notification-probes don't leak
+// the headless default ('denied'). Fingerprinters often probe this.
+if (navigator.permissions && navigator.permissions.query) {
+    const origQuery = navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query = (p) =>
+        p && p.name === 'notifications'
+            ? Promise.resolve({state: 'prompt'})
+            : origQuery(p);
+}
+
+// 6. Spoof the WebGL vendor strings (headless uses SwiftShader - obvious tell)
 const getParameter = WebGLRenderingContext.prototype.getParameter;
 WebGLRenderingContext.prototype.getParameter = function(parameter) {
     // UNMASKED_VENDOR_WEBGL
@@ -93,6 +117,13 @@ WebGLRenderingContext.prototype.getParameter = function(parameter) {
     return getParameter.apply(this, [parameter]);
 };
 """
+
+_DEFAULT_LAUNCH_ARGS = (
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-blink-features=AutomationControlled",
+    "--disable-features=IsolateOrigins,site-per-process",
+)
 
 
 class Layer4Stealth:
@@ -106,31 +137,50 @@ class Layer4Stealth:
         self,
         ua_pool: tuple[str, ...] | None = None,
         block_resources: bool = True,
-        wait_until: str = "networkidle",
+        wait_until: str | None = None,
         rng: random.Random | None = None,
     ) -> None:
         self._ua_pool: tuple[str, ...] = tuple(ua_pool) if ua_pool is not None else _UA_POOL
         if not self._ua_pool:
             raise ValueError("Layer4Stealth requires at least one UA in ua_pool")
         self._block_resources = block_resources
-        self._wait_until = wait_until
+        # ``wait_until`` overrides the default ``domcontentloaded``/``load``
+        # strategy. Kept for backward compat with callers (and the Iter 9
+        # smoke test) that pin it explicitly.
+        self._wait_until_override = wait_until
         self._rng = rng if rng is not None else random.Random()
 
     def _pick_user_agent(self) -> str:
         """Random UA from pool. Deterministic when a seeded ``rng`` is injected."""
         return self._rng.choice(self._ua_pool)
 
-    def fetch(self, url: str, timeout: float = 30.0) -> FetchResult:
-        """Render ``url`` with stealth-patched Chromium, return the HTML."""
+    def fetch(
+        self,
+        url: str,
+        timeout: float = 30.0,
+        *,
+        wait_selector: str | None = None,
+    ) -> FetchResult:
+        """Render ``url`` with stealth-patched Chromium, return the HTML.
+
+        ``wait_selector`` matches the Layer 3 contract: when provided,
+        the layer blocks on ``wait_for_selector(state="attached")``
+        before reading ``page.content()``. See the module docstring for
+        the full wait strategy.
+        """
         ua = self._pick_user_agent()
+        timeout_ms = int(timeout * 1000)
+        nav_timeout_ms = max(5_000, int(timeout_ms * 0.6))
+        selector_timeout_ms = max(3_000, timeout_ms - nav_timeout_ms)
+        if self._wait_until_override is not None:
+            nav_wait_until = self._wait_until_override
+        else:
+            nav_wait_until = "domcontentloaded" if wait_selector else "load"
         try:
             with sync_playwright() as p:
                 browser = p.chromium.launch(
                     headless=True,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--disable-features=IsolateOrigins,site-per-process",
-                    ],
+                    args=list(_DEFAULT_LAUNCH_ARGS),
                 )
                 try:
                     context = browser.new_context(
@@ -149,14 +199,26 @@ class Layer4Stealth:
                     try:
                         response = page.goto(
                             url,
-                            wait_until=self._wait_until,
-                            timeout=int(timeout * 1000),
+                            wait_until=nav_wait_until,
+                            timeout=nav_timeout_ms,
                         )
                     except PlaywrightTimeoutError as e:
                         raise ScrapeError(f"layer4 navigation timeout: {e}") from e
                     status = response.status if response is not None else None
                     if status is not None and status >= 400:
                         raise ScrapeError(f"layer4 HTTP {status} for {url}")
+                    if wait_selector:
+                        try:
+                            page.wait_for_selector(
+                                wait_selector,
+                                state="attached",
+                                timeout=selector_timeout_ms,
+                            )
+                        except PlaywrightTimeoutError as e:
+                            raise ScrapeError(
+                                f"layer4 selector '{wait_selector}' did not appear "
+                                f"within {selector_timeout_ms}ms: {e}"
+                            ) from e
                     html = page.content()
                     final_url = page.url
                     context.close()

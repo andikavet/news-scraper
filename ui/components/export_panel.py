@@ -106,25 +106,34 @@ def build_workbook_bytes(
                     grouping,
                     global_excludes=app_settings.overall_exclude_tokens,
                 )
-            agg_df = build_aggregation(items_df, grouping)
+            monthly_df = build_aggregation(items_df, grouping, period="month")
+            quarterly_df = build_aggregation(items_df, grouping, period="quarter")
 
             items_sheet = _safe_sheet_name(f"{grouping.name}_items", used)
-            agg_sheet = _safe_sheet_name(f"{grouping.name}_aggregation", used)
+            quarterly_sheet = _safe_sheet_name(f"{grouping.name}_quarterly", used)
+            monthly_sheet = _safe_sheet_name(f"{grouping.name}_aggregation", used)
             items_df.to_excel(writer, sheet_name=items_sheet, index=False)
-            # When there are no dated rows, the aggregation frame has an
-            # empty MultiIndex column header, which pandas refuses to write
-            # to Excel (zip strict=True barfs). Fall back to writing just
-            # the category index column so the sheet still exists with the
-            # full row list — keeps the workbook structure predictable.
-            if len(agg_df.columns) == 0:
-                pd.DataFrame(index=agg_df.index).to_excel(writer, sheet_name=agg_sheet, index=True)
-            else:
-                # Aggregation keeps its Category index + 2-level MultiIndex
-                # column header. Excel renders both natively; the
-                # numbered-list `\n` separators turn into multi-line cells
-                # with wrap-text.
-                agg_df.to_excel(writer, sheet_name=agg_sheet, index=True)
+            _write_aggregation_sheet(writer, quarterly_df, quarterly_sheet)
+            _write_aggregation_sheet(writer, monthly_df, monthly_sheet)
     return buf.getvalue()
+
+
+def _write_aggregation_sheet(writer: pd.ExcelWriter, agg_df: pd.DataFrame, sheet_name: str) -> None:
+    """Write an aggregation frame to ``sheet_name``, tolerating empty columns.
+
+    When a grouping has no dated rows, the aggregation frame has an empty
+    MultiIndex column header, which pandas refuses to write to Excel (zip
+    strict=True raises). We fall back to writing just the category index
+    column so the sheet still exists with the full row list — keeps the
+    workbook structure predictable.
+    """
+    if len(agg_df.columns) == 0:
+        pd.DataFrame(index=agg_df.index).to_excel(writer, sheet_name=sheet_name, index=True)
+        return
+    # Category index + 2-level MultiIndex column header. Excel renders both
+    # natively; numbered-list `\n` separators turn into multi-line cells
+    # with wrap-text.
+    agg_df.to_excel(writer, sheet_name=sheet_name, index=True)
 
 
 def raw_csv_bytes(items: list[NewsItem]) -> bytes:
@@ -181,8 +190,9 @@ def render(
         )
     with cols[2]:
         st.caption(
-            f"Workbook contains 1 raw sheet + 2 sheets per grouping "
-            f"({len(groupings)} grouping{'s' if len(groupings) != 1 else ''})."
+            f"Workbook contains 1 raw sheet + 3 sheets per grouping "
+            f"(items + quarterly + monthly) for {len(groupings)} "
+            f"grouping{'s' if len(groupings) != 1 else ''}."
         )
 
 

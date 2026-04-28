@@ -67,7 +67,13 @@ class _Fetcher(Protocol):
     name: str
     layer_number: int
 
-    def fetch(self, url: str, timeout: float = 20.0) -> FetchResult: ...
+    def fetch(
+        self,
+        url: str,
+        timeout: float = 20.0,
+        *,
+        wait_selector: str | None = None,
+    ) -> FetchResult: ...
 
 
 # --------------------------------------------------------------------------- #
@@ -225,6 +231,7 @@ def run_url_params_source(
             url=req.url,
             max_retries=source.max_retries,
             sleep=sleep,
+            wait_selector=source.selectors.container or None,
         )
         stats.pages_scanned += 1
         if outcome is None:

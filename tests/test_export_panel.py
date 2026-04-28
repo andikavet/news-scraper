@@ -81,14 +81,16 @@ def app_settings() -> AppSettings:
 
 
 def test_workbook_has_one_sheet_per_grouping_pair_plus_raw(items, groupings, app_settings) -> None:
-    """Workbook layout: 1 raw sheet + 2 sheets per grouping (items + aggregation)."""
+    """Workbook layout: 1 raw sheet + 3 sheets per grouping (items + quarterly + monthly)."""
     blob = build_workbook_bytes(items, groupings, app_settings)
     wb = load_workbook(io.BytesIO(blob))
     expected = {
         "Raw Data",
         "Sektor_items",
+        "Sektor_quarterly",
         "Sektor_aggregation",
         "Pengeluaran_items",
+        "Pengeluaran_quarterly",
         "Pengeluaran_aggregation",
     }
     assert set(wb.sheetnames) == expected
@@ -225,8 +227,49 @@ def test_empty_items_still_produces_valid_workbook(groupings, app_settings) -> N
     """An empty run should still produce a structured workbook (just no data rows)."""
     blob = build_workbook_bytes([], groupings, app_settings)
     wb = load_workbook(io.BytesIO(blob))
-    # Raw Data + items + pivot per grouping.
+    # Raw Data + items + quarterly + monthly per grouping.
     assert "Raw Data" in wb.sheetnames
     assert "Sektor_items" in wb.sheetnames
+    assert "Sektor_quarterly" in wb.sheetnames
+    assert "Sektor_aggregation" in wb.sheetnames
     # Header row exists; no data rows.
     assert wb["Raw Data"].max_row == 1
+
+
+def test_quarterly_sheet_uses_q1_style_column_header(items, groupings, app_settings) -> None:
+    """The quarterly sheet's top-level header is ``Q1-2026`` etc., not month names."""
+    blob = build_workbook_bytes(items, groupings, app_settings)
+    wb = load_workbook(io.BytesIO(blob))
+    sheet = wb["Sektor_quarterly"]
+    # Row 1 is the Quarter header, row 2 is the Field header, data starts
+    # at row 4 (after the index-name blank row).
+    row1 = [sheet.cell(row=1, column=c).value for c in range(1, sheet.max_column + 1)]
+    # Expect "Q1-2026" to appear in the top header row for the Jan-2026 data.
+    assert any(isinstance(v, str) and v.startswith("Q1-2026") for v in row1)
+
+
+def test_quarterly_sheet_includes_every_category_as_a_row(app_settings) -> None:
+    """Category completeness applies to the quarterly sheet too."""
+    grouping = CategorizerGrouping(
+        name="Sektor",
+        rules=[
+            CategoryRule(category="Agri", include_tokens=["pertanian"]),
+            CategoryRule(category="Energi", include_tokens=["bbm"]),
+            CategoryRule(category="Tambang", include_tokens=["mineral"]),
+        ],
+    )
+    items_list = [
+        NewsItem(
+            title="Harga BBM naik",
+            link="https://x.test/a1",
+            date_raw="15 Jan 2026",
+            date_parsed=date(2026, 1, 15),
+            source="PortalA",
+            page=1,
+        ),
+    ]
+    blob = build_workbook_bytes(items_list, [grouping], app_settings)
+    wb = load_workbook(io.BytesIO(blob))
+    sheet = wb["Sektor_quarterly"]
+    index_values = {sheet.cell(row=r, column=1).value for r in range(1, sheet.max_row + 1)}
+    assert {"Agri", "Energi", "Tambang"} <= index_values
