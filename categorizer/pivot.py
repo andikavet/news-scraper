@@ -253,13 +253,15 @@ def build_all_aggregations(
 
 
 def aggregation_to_html(df: pd.DataFrame) -> str:
-    """Convert an aggregation frame to HTML that respects ``\\n``.
+    """Convert an aggregation frame to HTML with numbered-list line breaks.
 
-    The default ``df.to_html`` output collapses newlines visually because
-    HTML treats whitespace as a single space. We pair the un-escaped HTML
-    with a wrapper ``<div>`` that has CSS ``white-space: pre-wrap``,
-    which preserves both spaces and line breaks. The whole snippet is
-    safe to drop into ``st.markdown(..., unsafe_allow_html=True)``.
+    ``pd.DataFrame.to_html(escape=True)`` serialises real ``\\n`` characters
+    as the literal two-character sequence ``\\n`` in the output, which the
+    browser then renders verbatim — CSS ``white-space: pre-wrap`` can't
+    recover line breaks from text that no longer contains newlines. To
+    honour the spec requirement that numbered-list cells render as visible
+    multi-line text, we build the table markup directly: every cell's
+    text is HTML-escaped first, then each ``\\n`` is swapped for ``<br>``.
 
     Keeping the HTML build out of the Streamlit module means the renderer
     is testable and the markup stays consistent across call sites
@@ -267,7 +269,7 @@ def aggregation_to_html(df: pd.DataFrame) -> str:
     """
     if df.empty or len(df.columns) == 0:
         return ""
-    table_html = df.to_html(escape=True, na_rep="", border=0)
+
     css = (
         "<style>"
         ".aggregation-wrapper table {"
@@ -275,7 +277,7 @@ def aggregation_to_html(df: pd.DataFrame) -> str:
         ".aggregation-wrapper th, .aggregation-wrapper td {"
         " border: 1px solid rgba(128,128,128,0.3); padding: 6px 8px;"
         " vertical-align: top; text-align: left;"
-        " white-space: pre-wrap; word-break: break-word; }"
+        " word-break: break-word; }"
         ".aggregation-wrapper thead th {"
         " background: rgba(128,128,128,0.12);"
         " position: sticky; top: 0; z-index: 1; }"
@@ -285,7 +287,84 @@ def aggregation_to_html(df: pd.DataFrame) -> str:
         " border: 1px solid rgba(128,128,128,0.25); border-radius: 4px; }"
         "</style>"
     )
-    return css + f'<div class="aggregation-wrapper">{table_html}</div>'
+    return css + f'<div class="aggregation-wrapper">{_build_aggregation_table_html(df)}</div>'
+
+
+def _escape_cell(value: object) -> str:
+    """HTML-escape ``value`` and turn real ``\\n`` characters into ``<br>``.
+
+    Anything that isn't a string (``NaN``, ``None``, numbers) collapses to
+    the empty cell our aggregation contract expects.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    if not isinstance(value, str):
+        value = str(value)
+    # ``html.escape`` would also quote ``"`` / ``'`` but that is gratuitous
+    # for visible cell text. Hand-roll the three characters the HTML parser
+    # actually reacts to so the output stays compact.
+    escaped = value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return escaped.replace("\n", "<br>")
+
+
+def _build_aggregation_table_html(df: pd.DataFrame) -> str:
+    """Hand-rolled ``<table>`` that preserves ``\\n`` → ``<br>`` in cells."""
+    columns = df.columns
+    index_levels = df.index.names
+    index_nlevels = df.index.nlevels
+    parts: list[str] = ['<table border="0"><thead>']
+
+    if isinstance(columns, pd.MultiIndex):
+        # Top-level row shows each unique period label spanning the
+        # SUBCOLUMNS under it. We rely on the ordered uniqueness that
+        # ``build_aggregation`` guarantees (chronological period order +
+        # identical subcolumns per period).
+        top_spans: list[tuple[str, int]] = []
+        for top, _ in columns.tolist():
+            if top_spans and top_spans[-1][0] == top:
+                top_spans[-1] = (top, top_spans[-1][1] + 1)
+            else:
+                top_spans.append((top, 1))
+        parts.append("<tr>")
+        parts.append(f"<th>{_escape_cell(columns.names[0])}</th>")
+        for top, span in top_spans:
+            colspan = f' colspan="{span}"' if span > 1 else ""
+            parts.append(f"<th{colspan}>{_escape_cell(top)}</th>")
+        parts.append("</tr>")
+        parts.append("<tr>")
+        parts.append(f"<th>{_escape_cell(columns.names[1])}</th>")
+        for _, sub in columns.tolist():
+            parts.append(f"<th>{_escape_cell(sub)}</th>")
+        parts.append("</tr>")
+    else:
+        parts.append("<tr>")
+        for name in list(index_levels) + list(columns):
+            parts.append(f"<th>{_escape_cell(name)}</th>")
+        parts.append("</tr>")
+
+    if isinstance(columns, pd.MultiIndex) and index_nlevels == 1:
+        # Spec: show the Category label above the data rows so the header
+        # block reads "Period → Field → Category" top-to-bottom.
+        parts.append("<tr>")
+        parts.append(f"<th>{_escape_cell(index_levels[0])}</th>")
+        parts.append(f'<th colspan="{len(columns)}"></th>')
+        parts.append("</tr>")
+
+    parts.append("</thead><tbody>")
+    for idx, row in df.iterrows():
+        parts.append("<tr>")
+        if isinstance(idx, tuple):
+            for lvl in idx:
+                parts.append(f"<th>{_escape_cell(lvl)}</th>")
+        else:
+            parts.append(f"<th>{_escape_cell(idx)}</th>")
+        for val in row.tolist():
+            parts.append(f"<td>{_escape_cell(val)}</td>")
+        parts.append("</tr>")
+    parts.append("</tbody></table>")
+    return "".join(parts)
 
 
 __all__ = [

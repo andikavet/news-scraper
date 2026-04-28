@@ -9,7 +9,8 @@ tests pin the new shape's invariants:
 - Columns are a 2-level ``MultiIndex(Month, [Title, Link, Date])`` where
   the months are derived from the data and ordered chronologically.
 - Cell values are strings of numbered lists separated by ``\\n``.
-- The HTML renderer respects ``\\n`` via ``white-space: pre-wrap`` CSS.
+- The HTML renderer turns real ``\\n`` characters into ``<br>`` tags so the
+  numbered lists render as visible multi-line text.
 """
 
 from __future__ import annotations
@@ -383,7 +384,7 @@ def test_edited_frame_with_unknown_category_is_silently_skipped() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_aggregation_to_html_emits_pre_wrap_css_for_newline_preservation() -> None:
+def test_aggregation_to_html_converts_newlines_to_br_tags() -> None:
     grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
     items = [
         NewsItem(
@@ -408,13 +409,17 @@ def test_aggregation_to_html_emits_pre_wrap_css_for_newline_preservation() -> No
 
     html = aggregation_to_html(agg)
 
-    # The CSS rule that makes `\n` render as visible line breaks.
-    assert "white-space: pre-wrap" in html
     # The wrapper class the dashboard scopes its CSS under.
     assert 'class="aggregation-wrapper"' in html
     # The actual numbered-list content survives the HTML conversion.
     assert "1. A: pertanian" in html
     assert "2. B: pertanian" in html
+    # Real newlines between items 1 and 2 must become <br> tags — literal
+    # "\n" in the DOM would render as visible backslash-n text because
+    # pandas' `to_html(escape=True)` serialises control chars that way.
+    assert "1. A: pertanian<br>2. B: pertanian" in html
+    # And no stray literal backslash-n should remain in the output.
+    assert "\\n" not in html
 
 
 def test_aggregation_to_html_returns_empty_string_for_empty_frame() -> None:
