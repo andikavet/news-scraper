@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8">
+  <title>SuaraNTB fixture — delayed JS listing</title>
+</head>
+<body>
+  <!-- Before JS hydration the listing container is empty. An HTTP-only
+       fetch (Layer 1/2) sees no rows here; Layer 3/4 must block on the
+       container becoming populated. -->
+  <div id="tdi_63"></div>
+
+  <!-- A noisy long-polling script mimics the analytics/ad beacon
+       behaviour on ad-heavy news portals: it fires a setInterval fetch
+       so `networkidle` never settles. Anyone relying on
+       `wait_until="networkidle"` would time out. The correct fix is
+       `wait_for_selector("#tdi_63 .td-cpt-post")`. -->
+  <script>
+    // Never-ending ping so networkidle is unreachable. We hit a data:
+    // URL so no external network is required.
+    setInterval(() => {
+      fetch("data:text/plain,ping").catch(() => {});
+    }, 30);
+
+    // Delay the listing injection so a naive fetcher that reads the DOM
+    // immediately after `DOMContentLoaded` sees an empty container.
+    setTimeout(() => {
+      const root = document.getElementById("tdi_63");
+      const items = [
+        {
+          title: "Kejurnas MRS Musim Balap 2026 Dimulai, Diikuti 102 Pembalap",
+          href: "https://example.test/news/mrs-2026",
+          date: "25/04/2026",
+        },
+        {
+          title: "Nekat Mogok Kerja, PPPK Paruh Waktu Lombok Tengah Bisa Terkena Sanksi Berat",
+          href: "https://example.test/news/pppk-mogok",
+          date: "24/04/2026",
+        },
+        {
+          title: "Kementerian Komdigi Dorong Pemda Implementasi Program Kampung Internet",
+          href: "https://example.test/news/komdigi-kampung-internet",
+          date: "23/04/2026",
+        },
+      ];
+      for (const it of items) {
+        const card = document.createElement("div");
+        card.className = "td-cpt-post";
+        const h = document.createElement("h3");
+        h.className = "td-module-title";
+        const a = document.createElement("a");
+        a.href = it.href;
+        a.textContent = it.title;
+        h.appendChild(a);
+        const d = document.createElement("span");
+        d.className = "td-module-date";
+        d.textContent = it.date;
+        card.appendChild(h);
+        card.appendChild(d);
+        root.appendChild(card);
+      }
+    }, 400);
+  </script>
+</body>
+</html>

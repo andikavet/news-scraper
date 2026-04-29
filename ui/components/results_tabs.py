@@ -44,6 +44,7 @@ K_RUN_ITEMS = "run_items"  # list[NewsItem] — stashed after each completed run
 K_EDITOR_FRAME_PREFIX = "results_editor_frame__"
 K_EDITOR_AUTO_SOURCE_PREFIX = "results_editor_auto_source__"
 K_PIVOT_SNAPSHOT_PREFIX = "results_pivot_snapshot__"
+K_QUARTER_PIVOT_SNAPSHOT_PREFIX = "results_quarter_pivot_snapshot__"
 
 
 def stash_items(items: list[NewsItem]) -> None:
@@ -72,6 +73,7 @@ def _clear_all_grouping_caches() -> None:
             key.startswith(K_EDITOR_FRAME_PREFIX)
             or key.startswith(K_EDITOR_AUTO_SOURCE_PREFIX)
             or key.startswith(K_PIVOT_SNAPSHOT_PREFIX)
+            or key.startswith(K_QUARTER_PIVOT_SNAPSHOT_PREFIX)
         ):
             st.session_state.pop(key, None)
 
@@ -92,6 +94,10 @@ def _auto_source_key(grouping_name: str) -> str:
 
 def _pivot_snapshot_key(grouping_name: str) -> str:
     return K_PIVOT_SNAPSHOT_PREFIX + grouping_name
+
+
+def _quarter_pivot_snapshot_key(grouping_name: str) -> str:
+    return K_QUARTER_PIVOT_SNAPSHOT_PREFIX + grouping_name
 
 
 def _auto_source_fingerprint(
@@ -143,8 +149,9 @@ def _render_grouping_tab(
     if st.session_state.get(auto_source_k) != fingerprint:
         st.session_state[auto_source_k] = fingerprint
         st.session_state[editor_k] = auto_df.copy()
-        # Any previous pivot snapshot is now stale.
+        # Any previous aggregation snapshots are now stale.
         st.session_state.pop(_pivot_snapshot_key(grouping.name), None)
+        st.session_state.pop(_quarter_pivot_snapshot_key(grouping.name), None)
 
     edited_df: pd.DataFrame = st.session_state[editor_k]
     n_items_matched = edited_df["Title"].nunique() if not edited_df.empty else 0
@@ -172,11 +179,12 @@ def _render_grouping_tab(
     # snapshot so the frame survives reruns triggered by other widgets.
     st.session_state[editor_k] = new_edited
 
-    st.markdown("##### Aggregation: Category × Month")
+    st.markdown("##### Aggregation")
     st.caption(
         "Rows show **every category** in this grouping (sorted ascending). "
-        "Columns expand by month derived from the article date. Each cell is "
-        "a numbered list of the actual article fields — newlines are preserved."
+        "Each cell is a numbered list of the actual article fields — newlines "
+        "are preserved. **Update Aggregation** rebuilds both the quarterly "
+        "and monthly tables from the currently-edited rows above."
     )
     btn_col, _ = st.columns([0.22, 1])
     with btn_col:
@@ -184,24 +192,44 @@ def _render_grouping_tab(
             "Update Aggregation",
             key=f"update_pivot__{grouping.name}",
             use_container_width=True,
-            help="Rebuild the aggregation from the currently-edited rows above.",
+            help=(
+                "Rebuild both the Quarterly and Monthly aggregation tables "
+                "from the currently-edited rows above."
+            ),
         )
 
     pivot_snap_k = _pivot_snapshot_key(grouping.name)
+    quarter_snap_k = _quarter_pivot_snapshot_key(grouping.name)
+    # A single click refreshes BOTH frames so the two tables never disagree.
     if update_clicked or pivot_snap_k not in st.session_state:
-        st.session_state[pivot_snap_k] = build_aggregation(new_edited, grouping)
+        st.session_state[pivot_snap_k] = build_aggregation(new_edited, grouping, period="month")
+    if update_clicked or quarter_snap_k not in st.session_state:
+        st.session_state[quarter_snap_k] = build_aggregation(new_edited, grouping, period="quarter")
 
+    quarter_df: pd.DataFrame = st.session_state[quarter_snap_k]
     pivot_df: pd.DataFrame = st.session_state[pivot_snap_k]
-    if pivot_df.empty or len(pivot_df.columns) == 0:
-        st.caption(
-            "No dated rows to aggregate yet — edit the table above or click "
-            "**Update Aggregation** after a scrape produces dated items."
-        )
-    else:
-        # `st.dataframe` collapses `\n` into a single visual line; we render
-        # an HTML table whose CSS has `white-space: pre-wrap` so each
-        # numbered-list cell renders across multiple lines as required.
-        st.markdown(aggregation_to_html(pivot_df), unsafe_allow_html=True)
+
+    # Quarterly table rendered ABOVE the monthly one per the spec.
+    with st.expander("Tabel Triwulanan (Quarterly — Q1…Q4)", expanded=True):
+        if quarter_df.empty or len(quarter_df.columns) == 0:
+            st.caption(
+                "No dated rows to aggregate yet — edit the table above or "
+                "click **Update Aggregation** after a scrape produces dated items."
+            )
+        else:
+            st.markdown(aggregation_to_html(quarter_df), unsafe_allow_html=True)
+
+    with st.expander("Tabel Bulanan (Monthly)", expanded=True):
+        if pivot_df.empty or len(pivot_df.columns) == 0:
+            st.caption(
+                "No dated rows to aggregate yet — edit the table above or "
+                "click **Update Aggregation** after a scrape produces dated items."
+            )
+        else:
+            # `st.dataframe` collapses `\n` into a single visual line; we
+            # render an HTML table whose CSS has `white-space: pre-wrap`
+            # so each numbered-list cell renders across multiple lines.
+            st.markdown(aggregation_to_html(pivot_df), unsafe_allow_html=True)
 
 
 def render(
@@ -230,6 +258,7 @@ __all__ = [
     "GROUPING_COLUMNS",
     "K_EDITOR_FRAME_PREFIX",
     "K_PIVOT_SNAPSHOT_PREFIX",
+    "K_QUARTER_PIVOT_SNAPSHOT_PREFIX",
     "K_RUN_ITEMS",
     "clear_stashed_items",
     "get_stashed_items",

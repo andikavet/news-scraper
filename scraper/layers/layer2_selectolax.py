@@ -38,7 +38,13 @@ class Layer2Selectolax:
     def __init__(self, user_agent: str = _MOBILE_UA) -> None:
         self._user_agent = user_agent
 
-    def fetch(self, url: str, timeout: float = 20.0) -> FetchResult:
+    def fetch(
+        self,
+        url: str,
+        timeout: float = 20.0,
+        *,
+        wait_selector: str | None = None,  # noqa: ARG002 — Layer 2 has no DOM to wait on
+    ) -> FetchResult:
         headers = {
             "User-Agent": self._user_agent,
             "Accept": (

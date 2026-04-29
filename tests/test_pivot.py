@@ -9,7 +9,8 @@ tests pin the new shape's invariants:
 - Columns are a 2-level ``MultiIndex(Month, [Title, Link, Date])`` where
   the months are derived from the data and ordered chronologically.
 - Cell values are strings of numbered lists separated by ``\\n``.
-- The HTML renderer respects ``\\n`` via ``white-space: pre-wrap`` CSS.
+- The HTML renderer turns real ``\\n`` characters into ``<br>`` tags so the
+  numbered lists render as visible multi-line text.
 """
 
 from __future__ import annotations
@@ -23,12 +24,15 @@ from categorizer.pivot import (
     COLUMN_LEVEL_NAMES,
     INDEX_NAME,
     INDONESIAN_MONTHS,
+    QUARTER_COLUMN_LEVEL_NAMES,
     SUBCOLUMNS,
     aggregation_to_html,
     build_aggregation,
     build_all_aggregations,
     month_label,
     numbered_list,
+    quarter_label,
+    quarter_of_month,
 )
 from config import CategorizerGrouping, CategoryRule
 from scraper.models import NewsItem
@@ -380,7 +384,7 @@ def test_edited_frame_with_unknown_category_is_silently_skipped() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_aggregation_to_html_emits_pre_wrap_css_for_newline_preservation() -> None:
+def test_aggregation_to_html_converts_newlines_to_br_tags() -> None:
     grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
     items = [
         NewsItem(
@@ -405,13 +409,17 @@ def test_aggregation_to_html_emits_pre_wrap_css_for_newline_preservation() -> No
 
     html = aggregation_to_html(agg)
 
-    # The CSS rule that makes `\n` render as visible line breaks.
-    assert "white-space: pre-wrap" in html
     # The wrapper class the dashboard scopes its CSS under.
     assert 'class="aggregation-wrapper"' in html
     # The actual numbered-list content survives the HTML conversion.
     assert "1. A: pertanian" in html
     assert "2. B: pertanian" in html
+    # Real newlines between items 1 and 2 must become <br> tags — literal
+    # "\n" in the DOM would render as visible backslash-n text because
+    # pandas' `to_html(escape=True)` serialises control chars that way.
+    assert "1. A: pertanian<br>2. B: pertanian" in html
+    # And no stray literal backslash-n should remain in the output.
+    assert "\\n" not in html
 
 
 def test_aggregation_to_html_returns_empty_string_for_empty_frame() -> None:
@@ -420,3 +428,224 @@ def test_aggregation_to_html_returns_empty_string_for_empty_frame() -> None:
     agg = build_aggregation(empty, grouping)
 
     assert aggregation_to_html(agg) == ""
+
+
+# --------------------------------------------------------------------------- #
+# Quarterly aggregation (Iter 14)
+# --------------------------------------------------------------------------- #
+
+
+def test_quarter_of_month_maps_calendar_months_correctly() -> None:
+    # Jan/Feb/Mar → 1
+    assert quarter_of_month(1) == 1
+    assert quarter_of_month(2) == 1
+    assert quarter_of_month(3) == 1
+    # Apr/May/Jun → 2
+    assert quarter_of_month(4) == 2
+    assert quarter_of_month(5) == 2
+    assert quarter_of_month(6) == 2
+    # Jul/Aug/Sep → 3
+    assert quarter_of_month(7) == 3
+    assert quarter_of_month(8) == 3
+    assert quarter_of_month(9) == 3
+    # Oct/Nov/Dec → 4
+    assert quarter_of_month(10) == 4
+    assert quarter_of_month(11) == 4
+    assert quarter_of_month(12) == 4
+
+
+def test_quarter_label_format_matches_spec_example() -> None:
+    # User spec example: "Q1-2026", "Q2-2026"
+    assert quarter_label(datetime(2026, 1, 15)) == "Q1-2026"
+    assert quarter_label(datetime(2026, 4, 1)) == "Q2-2026"
+    assert quarter_label(datetime(2026, 7, 31)) == "Q3-2026"
+    assert quarter_label(datetime(2026, 12, 1)) == "Q4-2026"
+    # Month-boundary cases.
+    assert quarter_label(datetime(2026, 3, 31)) == "Q1-2026"
+    assert quarter_label(datetime(2026, 10, 1)) == "Q4-2026"
+
+
+def test_quarter_of_month_rejects_out_of_range_values() -> None:
+    import pytest
+
+    with pytest.raises(ValueError):
+        quarter_of_month(0)
+    with pytest.raises(ValueError):
+        quarter_of_month(13)
+
+
+def test_build_aggregation_quarter_top_level_is_quarter_not_month() -> None:
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [_item("Pertanian Jan", date_parsed=datetime(2026, 1, 5))]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping, period="quarter")
+
+    assert agg.columns.nlevels == 2
+    assert agg.columns.names == list(QUARTER_COLUMN_LEVEL_NAMES)
+    quarters = agg.columns.get_level_values("Quarter").unique().tolist()
+    assert quarters == ["Q1-2026"]
+    fields = agg.columns.get_level_values("Field").tolist()
+    assert fields == SUBCOLUMNS
+
+
+def test_build_aggregation_quarter_collapses_months_in_same_quarter() -> None:
+    """Jan + Feb + Mar articles all fold into the single Q1-2026 bucket."""
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [
+        _item("Pertanian Jan", date_parsed=datetime(2026, 1, 5)),
+        _item("Pertanian Feb", date_parsed=datetime(2026, 2, 10)),
+        _item("Pertanian Mar", date_parsed=datetime(2026, 3, 20)),
+    ]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping, period="quarter")
+
+    quarters = agg.columns.get_level_values("Quarter").unique().tolist()
+    assert quarters == ["Q1-2026"]
+    title_cell = agg.loc["Agri", ("Q1-2026", "Title")]
+    # All three titles should appear as a single numbered list.
+    assert "1. Pertanian Jan" in title_cell
+    assert "2. Pertanian Feb" in title_cell
+    assert "3. Pertanian Mar" in title_cell
+
+
+def test_build_aggregation_quarter_order_is_chronological_across_quarters() -> None:
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [
+        _item("Pertanian Q3", date_parsed=datetime(2026, 8, 1)),
+        _item("Pertanian Q1", date_parsed=datetime(2026, 2, 1)),
+        _item("Pertanian Q4", date_parsed=datetime(2026, 11, 1)),
+        _item("Pertanian Q2", date_parsed=datetime(2026, 5, 1)),
+    ]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping, period="quarter")
+
+    quarters = agg.columns.get_level_values("Quarter").unique().tolist()
+    assert quarters == ["Q1-2026", "Q2-2026", "Q3-2026", "Q4-2026"]
+
+
+def test_build_aggregation_quarter_year_boundary_orders_chronologically() -> None:
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [
+        _item("Pertanian Q1 2026", date_parsed=datetime(2026, 2, 1)),
+        _item("Pertanian Q4 2025", date_parsed=datetime(2025, 11, 1)),
+    ]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping, period="quarter")
+
+    quarters = agg.columns.get_level_values("Quarter").unique().tolist()
+    assert quarters == ["Q4-2025", "Q1-2026"]
+
+
+def test_build_aggregation_quarter_preserves_category_completeness() -> None:
+    grouping = _grouping(
+        "Sektor",
+        [
+            _rule("Energi", ["bbm"]),
+            _rule("Agri", ["pertanian"]),
+            _rule("Tambang", ["tambang"]),
+        ],
+    )
+    items = [
+        _item("Harga BBM naik", date_parsed=datetime(2026, 2, 1)),
+        _item("Produksi pertanian stabil", date_parsed=datetime(2026, 3, 1)),
+    ]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping, period="quarter")
+
+    # All three categories present, sorted ascending; Tambang has no data
+    # but still appears with empty cells.
+    assert list(agg.index) == ["Agri", "Energi", "Tambang"]
+    assert all(agg.loc["Tambang", col] == "" for col in agg.columns)
+
+
+def test_build_aggregation_quarter_cells_are_numbered_lists() -> None:
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [
+        NewsItem(
+            title="First: pertanian",
+            link="https://link1.com",
+            date_raw="",
+            date_parsed=datetime(2026, 1, 5),
+            source="PortalA",
+            page=1,
+        ),
+        NewsItem(
+            title="Second: pertanian",
+            link="https://link2.com",
+            date_raw="",
+            date_parsed=datetime(2026, 2, 10),
+            source="PortalA",
+            page=1,
+        ),
+    ]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping, period="quarter")
+
+    title_cell = agg.loc["Agri", ("Q1-2026", "Title")]
+    link_cell = agg.loc["Agri", ("Q1-2026", "Link")]
+    date_cell = agg.loc["Agri", ("Q1-2026", "Date")]
+    assert title_cell == "1. First: pertanian\n2. Second: pertanian"
+    assert link_cell == "1. https://link1.com\n2. https://link2.com"
+    assert date_cell == "1. 05-01-2026\n2. 10-02-2026"
+
+
+def test_build_aggregation_default_period_is_month() -> None:
+    """Callers that don't pass ``period=`` keep the Iter 13 monthly behaviour."""
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    items = [_item("Pertanian", date_parsed=datetime(2026, 1, 5))]
+    frame = categorize_items_to_frame(items, grouping)
+
+    agg = build_aggregation(frame, grouping)  # no period kwarg
+
+    assert agg.columns.names == list(COLUMN_LEVEL_NAMES)
+    assert "Januari 2026" in agg.columns.get_level_values("Month").tolist()
+
+
+def test_build_aggregation_rejects_unknown_period() -> None:
+    import pytest
+
+    grouping = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    frame = categorize_items_to_frame([], grouping)
+
+    with pytest.raises(ValueError):
+        build_aggregation(frame, grouping, period="weekly")  # type: ignore[arg-type]
+
+
+def test_build_all_aggregations_threads_period_kwarg() -> None:
+    g1 = _grouping("Sektor", [_rule("Agri", ["pertanian"])])
+    g2 = _grouping("Pengeluaran", [_rule("Konsumsi", ["konsumsi"])])
+    items = [
+        _item("Pertanian Q1", date_parsed=datetime(2026, 2, 1)),
+        _item("Konsumsi Q2", date_parsed=datetime(2026, 5, 1)),
+    ]
+    frames = {
+        "Sektor": categorize_items_to_frame(items, g1),
+        "Pengeluaran": categorize_items_to_frame(items, g2),
+    }
+
+    monthly = build_all_aggregations(frames, [g1, g2], period="month")
+    quarterly = build_all_aggregations(frames, [g1, g2], period="quarter")
+
+    assert "Februari 2026" in monthly["Sektor"].columns.get_level_values("Month").tolist()
+    assert "Q1-2026" in quarterly["Sektor"].columns.get_level_values("Quarter").tolist()
+    assert "Q2-2026" in quarterly["Pengeluaran"].columns.get_level_values("Quarter").tolist()
+
+
+def test_empty_frame_quarter_mode_keeps_all_categories_no_columns() -> None:
+    grouping = _grouping(
+        "Sektor",
+        [_rule("Agri", ["pertanian"]), _rule("Energi", ["bbm"])],
+    )
+    empty = categorize_items_to_frame([], grouping)
+
+    agg = build_aggregation(empty, grouping, period="quarter")
+
+    assert list(agg.index) == ["Agri", "Energi"]
+    assert len(agg.columns) == 0
+    assert agg.columns.names == list(QUARTER_COLUMN_LEVEL_NAMES)

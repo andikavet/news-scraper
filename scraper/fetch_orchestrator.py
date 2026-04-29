@@ -62,7 +62,13 @@ class _Fetcher(Protocol):
     name: str
     layer_number: int
 
-    def fetch(self, url: str, timeout: float = 20.0) -> FetchResult: ...
+    def fetch(
+        self,
+        url: str,
+        timeout: float = 20.0,
+        *,
+        wait_selector: str | None = None,
+    ) -> FetchResult: ...
 
 
 @dataclass(frozen=True)
@@ -106,12 +112,18 @@ class FetchOrchestrator:
         sleep: Sleeper,
         *,
         retry_backoff: float = 2.0,
+        wait_selector: str | None = None,
     ) -> tuple[OrchestratorResult | None, list[str]]:
         """Attempt each layer in order; return the first success + per-layer errors.
 
         The second element of the tuple is a list of one error string per
         layer that failed — callers use it to annotate ``RunStats.errors``
         when the whole cascade gives up.
+
+        ``wait_selector`` (Iter 14) is forwarded to each layer's
+        :meth:`fetch`. JS-rendered layers (3 & 4) use it to block on the
+        container attaching to the DOM before returning; HTTP-only
+        layers (1 & 2) ignore it.
         """
         per_layer_errors: list[str] = []
         for layer in self._layers:
@@ -119,7 +131,7 @@ class FetchOrchestrator:
             last_err: str | None = None
             for attempt in range(attempts):
                 try:
-                    fetched = layer.fetch(url)
+                    fetched = _call_layer_fetch(layer, url, wait_selector)
                 except ScrapeError as e:
                     last_err = str(e)
                     logger.warning(
@@ -209,6 +221,25 @@ def build_layers_for_source(source: ScrapeSource) -> list[_Fetcher]:
         # *something*, rather than crashing the run.
         layers.append(Layer1Httpx())
     return layers
+
+
+def _call_layer_fetch(layer: _Fetcher, url: str, wait_selector: str | None) -> FetchResult:
+    """Invoke ``layer.fetch`` with ``wait_selector`` when the layer accepts it.
+
+    Older layers (and test doubles) don't declare the ``wait_selector``
+    keyword. We catch ``TypeError`` on the first call and retry without
+    the kwarg so the protocol extension is backward-compatible.
+    """
+    if wait_selector is None:
+        return layer.fetch(url)
+    try:
+        return layer.fetch(url, wait_selector=wait_selector)
+    except TypeError as e:
+        # Only swallow the specific "unexpected keyword argument" flavour.
+        # Any other TypeError (real bug in the layer) still propagates.
+        if "wait_selector" in str(e):
+            return layer.fetch(url)
+        raise
 
 
 def default_block_detector(fetched: FetchResult) -> BlockVerdict:
